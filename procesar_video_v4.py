@@ -44,6 +44,9 @@ Diferencias respecto a v3:
                         match_cola_candidato, cargar_cola, guardar_cola
     - En procesar_video: lógica de matching al inicio y guardado de cola al final
 
+También puede procesar un lote ordenado de videos. En ese modo, la cola producida
+por cada video se entrega automáticamente al siguiente.
+
 Uso:
     # Paso 1 — procesar video6AM (genera la cola automáticamente):
     python procesar_video_v4.py video6AM.mp4 \\
@@ -54,6 +57,11 @@ Uso:
     python procesar_video_v4.py video7AM.mp4 \\
         --timestamp-inicio "2025-06-02 07:00:00" \\
         --cola-anterior output/video6AM_v4_cola.json
+
+    # Procesar varios videos consecutivos (una hora de inicio por video):
+    python procesar_video_v4.py \\
+        --videos video6AM.mp4 video7AM.mp4 video8AM.mp4 \\
+        --timestamps-inicio "2025-06-02 06:00:00" "2025-06-02 07:00:00" "2025-06-02 08:00:00"
 
 Para el dataset de entrenamiento se usa procesar_video_v3.py.
 v4 añade registros con arrival_user real para personas carry-over cuando
@@ -1015,6 +1023,41 @@ def procesar_video(
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
 
+def procesar_lote(
+    videos: list[str],
+    timestamps_inicio: list[str],
+    zonas_path: str,
+    modelo_nombre: str = "yolov8m.pt",
+    guardar_video: bool = False,
+    output_dir: str = "output",
+    cola_anterior_path: str | None = None,
+) -> None:
+    """Procesa videos cronológicamente y encadena sus colas automáticamente."""
+    if len(videos) != len(timestamps_inicio):
+        raise ValueError(
+            "La cantidad de videos debe coincidir con la cantidad de timestamps de inicio."
+        )
+
+    cola_actual = cola_anterior_path
+    total = len(videos)
+    for indice, (video_path, timestamp_inicio) in enumerate(
+        zip(videos, timestamps_inicio), start=1
+    ):
+        print(f"\n{'#' * 60}\n  Lote: video {indice}/{total}\n{'#' * 60}")
+        procesar_video(
+            video_path=video_path,
+            zonas_path=zonas_path,
+            timestamp_inicio=timestamp_inicio,
+            modelo_nombre=modelo_nombre,
+            guardar_video=guardar_video,
+            output_dir=output_dir,
+            cola_anterior_path=cola_actual,
+        )
+
+        # procesar_video siempre escribe esta cola, incluso cuando está vacía.
+        cola_actual = str(Path(output_dir) / f"{Path(video_path).stem}_v4_cola.json")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=(
@@ -1022,10 +1065,14 @@ def main() -> None:
             "carry-over entre videos consecutivos"
         )
     )
-    p.add_argument("video",
-        help="Ruta al video de vigilancia")
-    p.add_argument("--timestamp-inicio", required=True,
+    p.add_argument("video", nargs="?",
+        help="Ruta a un video de vigilancia")
+    p.add_argument("--timestamp-inicio",
         help="Timestamp del primer frame del video: 'YYYY-MM-DD HH:MM:SS'")
+    p.add_argument("--videos", nargs="+", metavar="VIDEO",
+        help="Lista cronológica de videos para procesarlos como lote")
+    p.add_argument("--timestamps-inicio", nargs="+", metavar="TIMESTAMP",
+        help="Timestamps, en el mismo orden que --videos")
     p.add_argument("--zonas", default="zonas.json",
         help="Archivo generado por setup_zones.py (default: zonas.json)")
     p.add_argument("--modelo", default="yolov8m.pt",
@@ -1047,15 +1094,40 @@ def main() -> None:
 
     args = p.parse_args()
 
-    procesar_video(
-        video_path         = args.video,
-        zonas_path         = args.zonas,
-        timestamp_inicio   = args.timestamp_inicio,
-        modelo_nombre      = args.modelo,
-        guardar_video      = args.guardar_video,
-        output_dir         = args.output,
-        cola_anterior_path = args.cola_anterior,
-    )
+    if args.videos:
+        if args.video:
+            p.error("Usa un video posicional o --videos, no ambos.")
+        if args.timestamp_inicio:
+            p.error("Para un lote usa --timestamps-inicio, no --timestamp-inicio.")
+        if not args.timestamps_inicio:
+            p.error("--videos requiere --timestamps-inicio.")
+        if len(args.videos) != len(args.timestamps_inicio):
+            p.error("--videos y --timestamps-inicio deben tener la misma cantidad de valores.")
+
+        procesar_lote(
+            videos=args.videos,
+            timestamps_inicio=args.timestamps_inicio,
+            zonas_path=args.zonas,
+            modelo_nombre=args.modelo,
+            guardar_video=args.guardar_video,
+            output_dir=args.output,
+            cola_anterior_path=args.cola_anterior,
+        )
+    else:
+        if not args.video:
+            p.error("Indica un video o usa --videos para procesar un lote.")
+        if not args.timestamp_inicio:
+            p.error("El argumento --timestamp-inicio es obligatorio para un video.")
+
+        procesar_video(
+            video_path         = args.video,
+            zonas_path         = args.zonas,
+            timestamp_inicio   = args.timestamp_inicio,
+            modelo_nombre      = args.modelo,
+            guardar_video      = args.guardar_video,
+            output_dir         = args.output,
+            cola_anterior_path = args.cola_anterior,
+        )
 
 
 if __name__ == "__main__":
