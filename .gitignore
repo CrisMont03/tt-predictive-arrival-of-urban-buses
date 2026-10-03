@@ -1,10 +1,15 @@
 # Resultados generados al procesar videos
-output_10_01/
+**/output/
+**/output_*/
 
-# Entorno virtual y caché de Python
-.venv/
-__pycache__/
+# Entornos virtuales y caché de Python
+**/.venv/
+**/__pycache__/
 *.py[cod]
 
-# Archivos del sistema macOS
+# Videos y modelos locales pesados
+*.mp4
+*.pt
+
+# Archivos de macOS
 .DS_Store
