@@ -1,56 +1,48 @@
-# Welcome to your Expo app 👋
+# ARRIBO — aplicación móvil
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Expo SDK 57, TypeScript y Expo Router. Pantallas en `src/app`: acceso, Predicción, Historial, Alertas, Configuración y reporte de espera.
 
-## Get started
+## Probar sin modelo ni Firebase
 
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```sh
+npm ci
+npx expo start --go
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Abre la app con Expo Go compatible con SDK 57 y toca **Explorar demostración**. El modo predeterminado es `demo`; todos los resultados se identifican como ejemplos. Configuración permite simular demora, error y listas vacías. No se envía ningún dato a Firebase ni al backend en esta modalidad. Consultas, preferencias y reportes demo se guardan localmente.
 
-### Other setup steps
+## Conectar servicios reales
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+1. Crea `.env` usando `.env.example` y selecciona `EXPO_PUBLIC_APP_MODE=live`.
+2. Configura Firebase público (apiKey, authDomain, projectId, appId); nunca pongas una cuenta de servicio en `EXPO_PUBLIC_*`.
+3. Habilita Email/Password en Firebase Auth y Firestore. Publica reglas/índices de `../Firebase` después de probarlos.
+4. Configura `EXPO_PUBLIC_API_URL`. Desde el teléfono, usa la IP LAN del servidor o HTTPS público, no `localhost`. Reinicia Expo después de cambiar variables.
+5. El backend debe verificar tokens del mismo proyecto. Sin modelo aprobado, una consulta mostrará el error real de indisponibilidad.
 
-## Learn more
+GPS solicita permiso solo al activarlo; negarlo no bloquea las consultas. Historial y preferencias se aíslan por uid. Los reportes reales sin red se guardan en una cola y se reintentan al reconectar. No uses un backend `demo` con la app `live`: sus esquemas de autenticación son intencionalmente distintos.
 
-To learn more about developing your project with Expo, look at the following resources:
+## Verificar
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```sh
+npm test
+npm run lint
+npm run typecheck
+npx expo install --check
+npx expo export --platform all
+```
 
-## Join the community
+Expo genera los tipos de las rutas al ejecutar `expo start`. En una instalación limpia, inicia Expo antes de la primera comprobación de TypeScript.
 
-Join our community of developers creating universal apps.
+## Builds
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+`expo-dev-client` y `eas.json` están preparados. Después de configurar la cuenta/proyecto y las variables de EAS:
+
+```sh
+npx eas-cli@latest build --profile development --platform android
+```
+
+`preview` y `production` usan servicios reales. Configura sus variables antes de construir. No se han generado builds firmados ni publicado la app. Push está deshabilitado hasta implementar el registro de tokens y el servicio de envío; Alertas sí funciona dentro de la app.
+
+## Verificación manual pendiente
+
+Dispositivo físico: acceso/registro/recuperación, permisos denegados, logout durante una petición, reconexión con reportes pendientes, aislamiento entre dos cuentas, fuentes grandes y modo oscuro. La exportación de bundles no sustituye estas pruebas. Revisar los avisos de seguridad detallados en `../README.md` antes de publicar.

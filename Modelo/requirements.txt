@@ -1,0 +1,3 @@
+numpy>=2,<3
+tensorflow>=2.20,<2.22
+xgboost>=3,<4

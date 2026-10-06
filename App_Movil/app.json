@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "App_Movil",
+    "name": "ARRIBO",
     "slug": "App_Movil",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "appmovil",
+    "scheme": "arribo",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon"
@@ -28,11 +28,12 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#0071e3",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
-      ]
+      ],
+      ["expo-location", { "locationWhenInUsePermission": "ARRIBO usa tu ubicación solo para indicar si estás cerca de Río Consulado – Misterios." }]
     ],
     "experiments": {
       "typedRoutes": true,

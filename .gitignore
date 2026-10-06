@@ -13,3 +13,13 @@
 
 # Archivos de macOS
 .DS_Store
+
+# Local credentials and verification artifacts
+**/.env
+**/node_modules/
+**/.pytest_cache/
+**/firebase-debug.log
+**/firestore-debug.log
+**/ui-debug.log
+*.keras
+*.backup-*

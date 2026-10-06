@@ -1,0 +1,2 @@
+video_source,date,station_id,camera_id,start_at,end_at,continuity_group,verified,source_path,config_version
+Video6AM,2025-06-02,rio_consulado,rio_consulado_cctv_1,2025-06-02 06:00:00,2025-06-02 07:00:00,example-only,0,REEMPLAZAR,v4

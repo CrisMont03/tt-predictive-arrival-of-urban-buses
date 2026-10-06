@@ -117,6 +117,8 @@ COOLDOWN_BUS_SEG  = 130.0
 
 MIN_PRESENCIA_PERSONA_SEG = 1.2
 COOLDOWN_REENTRADA_SEG    = 20.0
+PERSONA_GAP_TOL_SEG      = 3.0
+PERSONA_OCLUSION_MAX_SEG = 15.0
 
 ID_SWITCH_VENTANA_SEG = 25.0
 ID_SWITCH_DIST_MAX    = 80
@@ -443,9 +445,36 @@ def guardar_cola(
 # POST-PROCESAMIENTO
 # ──────────────────────────────────────────────────────────────────────────────
 
+def bbox_ocultado_por_bus(bbox_persona, bboxes_bus) -> bool:
+    """Posible oclusión: un bus cubre al menos la mitad del último bbox."""
+    x1, y1, x2, y2 = bbox_persona
+    area = max(0, x2 - x1) * max(0, y2 - y1)
+    if area <= 0:
+        return False
+    for bx1, by1, bx2, by2 in bboxes_bus:
+        inter = max(0, min(x2, bx2) - max(x1, bx1)) * max(
+            0, min(y2, by2) - max(y1, by1)
+        )
+        if inter / area >= 0.5:
+            return True
+    return False
+
+
+def cerrar_periodo_persona(estado, perdida: dict) -> dict:
+    """Una ausencia no prolonga la espera salvo hasta un bus con posible oclusión."""
+    return {
+        "track_id": estado.track_id,
+        "entrada": estado.tiempo_entrada,
+        "salida": perdida.get("bus_ocluido", perdida["desde"]),
+        "ultima_deteccion": perdida["ultima_deteccion"],
+        "posible_occlusion_bus": perdida.get("bus_ocluido"),
+    }
+
+
 def calcular_tiempos_espera(
     llegadas_bus:    list,
     periodos_persona: list,
+    diagnostico: list | None = None,
 ) -> list:
     """
     Para cada bus confirmado:
@@ -474,20 +503,30 @@ def calcular_tiempos_espera(
         for p in periodos_persona:
             t_entrada = p["entrada"]
             t_salida  = p["salida"]
+            motivo = None
 
             if t_entrada >= t_bus:
-                continue
-            if t_salida is not None and t_salida < t_bus:  # if t_salida is not None and t_salida <= t_inicio:
-                continue
+                motivo = "entrada_posterior_al_bus"
+            elif t_salida is not None and t_salida < t_bus:
+                motivo = "salida_anterior_al_bus"
 
             t_efectivo = max(t_entrada, t_inicio)
-            if t_efectivo >= t_bus:
-                continue
-
             espera_seg = (t_bus - t_efectivo).total_seconds()
-            if espera_seg <= 0:
-                continue
-            if not (MIN_ESPERA_SEG <= espera_seg <= MAX_ESPERA_SEG):
+            if motivo is None:
+                if espera_seg < MIN_ESPERA_SEG:
+                    motivo = "espera_menor_al_minimo"
+                elif espera_seg > MAX_ESPERA_SEG:
+                    motivo = "espera_mayor_al_maximo"
+            if diagnostico is not None:
+                diagnostico.append({
+                    "track_id_persona": p["track_id"],
+                    "entrada": t_entrada,
+                    "salida": t_salida,
+                    "bus_arrival": t_bus,
+                    "motivo": motivo or "asociado",
+                    "asociacion_incierta": p.get("posible_occlusion_bus") == t_bus,
+                })
+            if motivo is not None:
                 continue
 
             registros_este_bus.append({
@@ -661,6 +700,8 @@ def procesar_video(
     personas_en_zona:    dict = {}
     periodos_persona:    list = []
     ultimas_salidas:     dict = {}
+    personas_ausentes:  dict = {}
+    personas_ultima_det: dict = {}
 
     # ── Estado: track-lifetime deduplication ──────────────────────────────────
     tracks_ultimo_bbox: dict = {}
@@ -743,6 +784,10 @@ def procesar_video(
             hay_bus_zona      = len(extraer_ids_sin_tracker(det_buses, zona_bus)) > 0
             ids_raw_zona      = extraer_ids_en_zona(det_personas, zona_person)
             ids_persona_actual: set = set()
+            ids_persona_visibles = {
+                tid_canonico.get(int(tid), int(tid))
+                for tid in (() if det_personas.tracker_id is None else det_personas.tracker_id)
+            }
 
             for tid_raw in ids_raw_zona:
                 bbox_raw = tracks_ultimo_bbox.get(tid_raw)
@@ -815,7 +860,12 @@ def procesar_video(
             # LÓGICA DE PERSONAS
             # ════════════════════════════════════════════════════════════════
 
-            for tid in ids_persona_actual - ids_persona_prev:
+            for tid in ids_persona_actual:
+                personas_ultima_det[tid] = t_actual
+                personas_ausentes.pop(tid, None)
+
+            # Reintentar altas tras el freeze/cooldown aunque el ID siga visible.
+            for tid in ids_persona_actual:
                 if tid in personas_pendientes or tid in personas_en_zona:
                     continue
                 if bus_freeze_hasta is not None and t_actual < bus_freeze_hasta:
@@ -868,16 +918,35 @@ def procesar_video(
                 personas_pendientes.pop(tid, None)
                 tid_a_arrival_real.pop(tid, None)   # limpiar si salió antes de confirmar
                 if tid in personas_en_zona:
-                    estado = personas_en_zona.pop(tid)
-                    ultimas_salidas[tid] = t_actual
-                    periodos_persona.append({
-                        "track_id": estado.track_id,
-                        "entrada":  estado.tiempo_entrada,
-                        "salida":   t_actual,
-                    })
+                    personas_ausentes[tid] = {
+                        "desde": t_actual,
+                        "ultima_deteccion": personas_ultima_det[tid],
+                    }
                 bbox_last = tracks_ultimo_bbox.get(tid)
                 if bbox_last is not None:
                     tracks_perdidos[tid] = (t_actual, bbox_last.copy())
+
+            for tid, perdida in list(personas_ausentes.items()):
+                gap = (t_actual - perdida["desde"]).total_seconds()
+                bbox_last = tracks_ultimo_bbox.get(tid)
+                ocluido = (
+                    gap <= PERSONA_OCLUSION_MAX_SEG
+                    and hay_bus_zona
+                    and tid not in ids_persona_visibles
+                    and bbox_last is not None
+                    and bbox_ocultado_por_bus(bbox_last, det_buses.xyxy)
+                )
+                if ocluido:
+                    # Solo conservar la asociación si el bus se confirma durante
+                    # esta ausencia y cubre la última posición de la persona.
+                    if llegadas_bus_confirmadas and llegadas_bus_confirmadas[-1] == t_actual:
+                        perdida["bus_ocluido"] = t_actual
+                if gap <= PERSONA_GAP_TOL_SEG or ocluido:
+                    continue
+                estado = personas_en_zona.pop(tid)
+                periodos_persona.append(cerrar_periodo_persona(estado, perdida))
+                ultimas_salidas[tid] = t_actual
+                del personas_ausentes[tid]
 
             ids_persona_prev = ids_persona_actual.copy()
 
@@ -900,11 +969,21 @@ def procesar_video(
 
     # Personas aún en zona al terminar el video
     for estado in personas_en_zona.values():
+        if estado.track_id in personas_ausentes:
+            periodos_persona.append(cerrar_periodo_persona(
+                estado, personas_ausentes[estado.track_id]
+            ))
+            continue
         periodos_persona.append({
             "track_id": estado.track_id,
             "entrada":  estado.tiempo_entrada,
             "salida":   None,
+            "ultima_deteccion": personas_ultima_det.get(estado.track_id),
         })
+
+    # Los ausentes al final no se deben exportar como físicamente presentes.
+    for tid in personas_ausentes:
+        personas_en_zona.pop(tid, None)
 
     # ── Guardar cola para el siguiente video ──────────────────────────────────
     # Se llama DESPUÉS de añadir las personas restantes a periodos_persona para
@@ -927,7 +1006,10 @@ def procesar_video(
     print(f"      Buses confirmados  : {len(llegadas_bus_confirmadas)}")
     print(f"      Periodos de persona: {len(periodos_persona)}")
 
-    registros = calcular_tiempos_espera(llegadas_bus_confirmadas, periodos_persona)
+    diagnostico = []
+    registros = calcular_tiempos_espera(
+        llegadas_bus_confirmadas, periodos_persona, diagnostico
+    )
 
     vistos: set = set()
     registros_unicos = []
@@ -940,6 +1022,19 @@ def procesar_video(
             vistos.add(tid)
             registros_unicos.append(r)
     registros = registros_unicos
+
+    diagnostico_path = Path(output_dir) / f"{nombre_base}_v4_diagnostico.json"
+    with open(diagnostico_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "video": video_path,
+            "persona_gap_tol_seg": PERSONA_GAP_TOL_SEG,
+            "persona_occlusion_max_seg": PERSONA_OCLUSION_MAX_SEG,
+            "periodos_persona": periodos_persona,
+            "asociaciones": diagnostico,
+            "registros_exportados": registros,
+        }, f, indent=2, ensure_ascii=False,
+            default=lambda t: t.isoformat(sep=" "))
+    print(f"      Diagnóstico: {diagnostico_path}")
 
     n_con_usuarios = sum(1 for r in registros if r["track_id_persona"] != -1)
     n_solo_bus     = sum(1 for r in registros if r["track_id_persona"] == -1)

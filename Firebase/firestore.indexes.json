@@ -1,0 +1,7 @@
+{
+  "indexes": [
+    { "collectionGroup": "alerts", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "station_id", "order": "ASCENDING" }, { "fieldPath": "active", "order": "ASCENDING" }] },
+    { "collectionGroup": "entries", "queryScope": "COLLECTION_GROUP", "fields": [{ "fieldPath": "station_id", "order": "ASCENDING" }, { "fieldPath": "simulation", "order": "ASCENDING" }, { "fieldPath": "received_at", "order": "ASCENDING" }] }
+  ],
+  "fieldOverrides": [{ "collectionGroup": "predictions", "fieldPath": "expiresAt", "ttl": true, "indexes": [] }]
+}
