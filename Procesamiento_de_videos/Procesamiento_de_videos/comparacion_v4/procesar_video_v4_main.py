@@ -44,9 +44,6 @@ Diferencias respecto a v3:
                         match_cola_candidato, cargar_cola, guardar_cola
     - En procesar_video: lógica de matching al inicio y guardado de cola al final
 
-También puede procesar un lote ordenado de videos. En ese modo, la cola producida
-por cada video se entrega automáticamente al siguiente.
-
 Uso:
     # Paso 1 — procesar video6AM (genera la cola automáticamente):
     python procesar_video_v4.py video6AM.mp4 \\
@@ -57,11 +54,6 @@ Uso:
     python procesar_video_v4.py video7AM.mp4 \\
         --timestamp-inicio "2025-06-02 07:00:00" \\
         --cola-anterior output/video6AM_v4_cola.json
-
-    # Procesar varios videos consecutivos (una hora de inicio por video):
-    python procesar_video_v4.py \\
-        --videos video6AM.mp4 video7AM.mp4 video8AM.mp4 \\
-        --timestamps-inicio "2025-06-02 06:00:00" "2025-06-02 07:00:00" "2025-06-02 08:00:00"
 
 Para el dataset de entrenamiento se usa procesar_video_v3.py.
 v4 añade registros con arrival_user real para personas carry-over cuando
@@ -96,7 +88,7 @@ FRAME_INTERVAL = 3
 MIN_DWELL_BUS_SEG = 0.2 #0.1
 BUS_GAP_TOL_SEG   = 3.0
 CONF_BUS_MIN      = 0.30
-BUS_RATIO_MIN     = 1.7 #1.3, 1.1
+BUS_RATIO_MIN     = 1.3 #1.1
 BUS_AREA_FRAC     = 0.02
 BUS_HSV_BAJO      = np.array([15, 25, 140])
 BUS_HSV_ALTO      = np.array([32, 180, 255])
@@ -104,11 +96,11 @@ BUS_COLOR_FRAC    = 0.08
 
 BUS_HSV_VERDE_BAJO   = np.array([35,  40,  80])
 BUS_HSV_VERDE_ALTO   = np.array([85, 255, 255])
-BUS_COLOR_VERDE_FRAC = 0.005 #0, 0.008
+BUS_COLOR_VERDE_FRAC = 0.0 # 0.008
 
 BUS_BLANCO_S_MAX    = 30
 BUS_BLANCO_V_MIN    = 150
-BUS_BLANCO_FRAC_MAX = 0.17 # 0.15, 0.2
+BUS_BLANCO_FRAC_MAX = 0.15 #0.2
 
 BUS_HSV_PURPURA_BAJO  = np.array([100,  50,  50])
 BUS_HSV_PURPURA_ALTO  = np.array([160, 255, 255])
@@ -117,10 +109,6 @@ COOLDOWN_BUS_SEG  = 130.0
 
 MIN_PRESENCIA_PERSONA_SEG = 1.2
 COOLDOWN_REENTRADA_SEG    = 20.0
-PERSONA_GAP_TOL_SEG      = 3.0
-PERSONA_OCLUSION_MAX_SEG = 15.0
-MIN_OBSERVACION_CANDIDATO_SEG = 5.0
-MAX_SALIDA_CANDIDATO_SEG      = 75.0
 
 ID_SWITCH_VENTANA_SEG = 25.0
 ID_SWITCH_DIST_MAX    = 80
@@ -144,7 +132,6 @@ UMBRAL_MATCH_PX    = 80     # distancia máxima (px) entre centroides para consi
 class EstadoPersona:
     track_id:       int
     tiempo_entrada: datetime
-    tiempo_entrada_observada: datetime | None = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -448,44 +435,13 @@ def guardar_cola(
 # POST-PROCESAMIENTO
 # ──────────────────────────────────────────────────────────────────────────────
 
-def bbox_ocultado_por_bus(bbox_persona, bboxes_bus) -> bool:
-    """Posible oclusión: un bus cubre al menos la mitad del último bbox."""
-    x1, y1, x2, y2 = bbox_persona
-    area = max(0, x2 - x1) * max(0, y2 - y1)
-    if area <= 0:
-        return False
-    for bx1, by1, bx2, by2 in bboxes_bus:
-        inter = max(0, min(x2, bx2) - max(x1, bx1)) * max(
-            0, min(y2, by2) - max(y1, by1)
-        )
-        if inter / area >= 0.5:
-            return True
-    return False
-
-
-def cerrar_periodo_persona(estado, perdida: dict) -> dict:
-    """Una ausencia no prolonga la espera salvo hasta un bus con posible oclusión."""
-    return {
-        "track_id": estado.track_id,
-        "entrada": estado.tiempo_entrada,
-        "salida": perdida.get("bus_ocluido", perdida["desde"]),
-        "salida_roi": perdida["desde"],
-        "entrada_observada": estado.tiempo_entrada_observada or estado.tiempo_entrada,
-        "ultima_deteccion": perdida["ultima_deteccion"],
-        "posible_occlusion_bus": perdida.get("bus_ocluido"),
-    }
-
-
 def calcular_tiempos_espera(
     llegadas_bus:    list,
     periodos_persona: list,
-    diagnostico: list | None = None,
 ) -> list:
     """
     Para cada bus confirmado:
       - Si había personas esperando → genera una fila por persona.
-      - Si salieron, admite candidatos observados al menos 5 segundos y cuya
-        salida ocurrió como máximo 75 segundos antes del bus.
       - Si NO había personas esperando → genera fila solo-bus (track_id=-1).
 
     Las personas carry-over (arrival_user anterior al inicio del video actual)
@@ -509,51 +465,21 @@ def calcular_tiempos_espera(
 
         for p in periodos_persona:
             t_entrada = p["entrada"]
-            t_salida  = p.get("salida_roi", p["salida"])
-            t_ultima = p.get("ultima_deteccion") or t_salida
-            t_observada = p.get("entrada_observada") or t_entrada
-            observacion_seg = (
-                (t_ultima - t_observada).total_seconds()
-                if t_ultima is not None else None
-            )
-            ausencia_seg = (
-                (t_bus - t_salida).total_seconds()
-                if t_salida is not None and t_salida < t_bus else None
-            )
-            motivo = None
+            t_salida  = p["salida"]
 
             if t_entrada >= t_bus:
-                motivo = "entrada_posterior_al_bus"
-            elif t_salida is not None and t_salida < t_bus:
-                if observacion_seg < MIN_OBSERVACION_CANDIDATO_SEG:
-                    motivo = "observacion_menor_al_minimo_candidato"
-                elif ausencia_seg > MAX_SALIDA_CANDIDATO_SEG:
-                    motivo = "salida_fuera_de_ventana_candidato"
-                elif t_salida <= t_inicio:
-                    motivo = "salida_anterior_al_intervalo"
+                continue
+            if t_salida is not None and t_salida < t_bus:  # if t_salida is not None and t_salida <= t_inicio:
+                continue
 
             t_efectivo = max(t_entrada, t_inicio)
+            if t_efectivo >= t_bus:
+                continue
+
             espera_seg = (t_bus - t_efectivo).total_seconds()
-            if motivo is None:
-                if espera_seg < MIN_ESPERA_SEG:
-                    motivo = "espera_menor_al_minimo"
-                elif espera_seg > MAX_ESPERA_SEG:
-                    motivo = "espera_mayor_al_maximo"
-            if diagnostico is not None:
-                diagnostico.append({
-                    "track_id_persona": p["track_id"],
-                    "entrada": t_entrada,
-                    "salida": t_salida,
-                    "bus_arrival": t_bus,
-                    "motivo": motivo or "asociado",
-                    "observacion_seg": observacion_seg,
-                    "seg_desde_salida": ausencia_seg,
-                    "candidato_tras_salida": motivo is None and ausencia_seg is not None,
-                    "asociacion_incierta": (
-                        ausencia_seg is not None or p.get("posible_occlusion_bus") == t_bus
-                    ),
-                })
-            if motivo is not None:
+            if espera_seg <= 0:
+                continue
+            if not (MIN_ESPERA_SEG <= espera_seg <= MAX_ESPERA_SEG):
                 continue
 
             registros_este_bus.append({
@@ -727,8 +653,6 @@ def procesar_video(
     personas_en_zona:    dict = {}
     periodos_persona:    list = []
     ultimas_salidas:     dict = {}
-    personas_ausentes:  dict = {}
-    personas_ultima_det: dict = {}
 
     # ── Estado: track-lifetime deduplication ──────────────────────────────────
     tracks_ultimo_bbox: dict = {}
@@ -811,10 +735,6 @@ def procesar_video(
             hay_bus_zona      = len(extraer_ids_sin_tracker(det_buses, zona_bus)) > 0
             ids_raw_zona      = extraer_ids_en_zona(det_personas, zona_person)
             ids_persona_actual: set = set()
-            ids_persona_visibles = {
-                tid_canonico.get(int(tid), int(tid))
-                for tid in (() if det_personas.tracker_id is None else det_personas.tracker_id)
-            }
 
             for tid_raw in ids_raw_zona:
                 bbox_raw = tracks_ultimo_bbox.get(tid_raw)
@@ -887,12 +807,7 @@ def procesar_video(
             # LÓGICA DE PERSONAS
             # ════════════════════════════════════════════════════════════════
 
-            for tid in ids_persona_actual:
-                personas_ultima_det[tid] = t_actual
-                personas_ausentes.pop(tid, None)
-
-            # Reintentar altas tras el freeze/cooldown aunque el ID siga visible.
-            for tid in ids_persona_actual:
+            for tid in ids_persona_actual - ids_persona_prev:
                 if tid in personas_pendientes or tid in personas_en_zona:
                     continue
                 if bus_freeze_hasta is not None and t_actual < bus_freeze_hasta:
@@ -934,9 +849,8 @@ def procesar_video(
                 t_arr = personas_pendientes.pop(tid)
                 # Si este track tiene un arrival_user real del video anterior,
                 # se usa ese en lugar del timestamp de detección actual.
-                t_observada = t_arr
                 t_arr = tid_a_arrival_real.pop(tid, t_arr)
-                personas_en_zona[tid] = EstadoPersona(tid, t_arr, t_observada)
+                personas_en_zona[tid] = EstadoPersona(tid, t_arr)
                 tqdm.write(
                     f"  Persona    | track={tid:3d} | "
                     f"llego {t_arr.strftime('%H:%M:%S')}"
@@ -946,35 +860,16 @@ def procesar_video(
                 personas_pendientes.pop(tid, None)
                 tid_a_arrival_real.pop(tid, None)   # limpiar si salió antes de confirmar
                 if tid in personas_en_zona:
-                    personas_ausentes[tid] = {
-                        "desde": t_actual,
-                        "ultima_deteccion": personas_ultima_det[tid],
-                    }
+                    estado = personas_en_zona.pop(tid)
+                    ultimas_salidas[tid] = t_actual
+                    periodos_persona.append({
+                        "track_id": estado.track_id,
+                        "entrada":  estado.tiempo_entrada,
+                        "salida":   t_actual,
+                    })
                 bbox_last = tracks_ultimo_bbox.get(tid)
                 if bbox_last is not None:
                     tracks_perdidos[tid] = (t_actual, bbox_last.copy())
-
-            for tid, perdida in list(personas_ausentes.items()):
-                gap = (t_actual - perdida["desde"]).total_seconds()
-                bbox_last = tracks_ultimo_bbox.get(tid)
-                ocluido = (
-                    gap <= PERSONA_OCLUSION_MAX_SEG
-                    and hay_bus_zona
-                    and tid not in ids_persona_visibles
-                    and bbox_last is not None
-                    and bbox_ocultado_por_bus(bbox_last, det_buses.xyxy)
-                )
-                if ocluido:
-                    # Solo conservar la asociación si el bus se confirma durante
-                    # esta ausencia y cubre la última posición de la persona.
-                    if llegadas_bus_confirmadas and llegadas_bus_confirmadas[-1] == t_actual:
-                        perdida["bus_ocluido"] = t_actual
-                if gap <= PERSONA_GAP_TOL_SEG or ocluido:
-                    continue
-                estado = personas_en_zona.pop(tid)
-                periodos_persona.append(cerrar_periodo_persona(estado, perdida))
-                ultimas_salidas[tid] = t_actual
-                del personas_ausentes[tid]
 
             ids_persona_prev = ids_persona_actual.copy()
 
@@ -997,22 +892,11 @@ def procesar_video(
 
     # Personas aún en zona al terminar el video
     for estado in personas_en_zona.values():
-        if estado.track_id in personas_ausentes:
-            periodos_persona.append(cerrar_periodo_persona(
-                estado, personas_ausentes[estado.track_id]
-            ))
-            continue
         periodos_persona.append({
             "track_id": estado.track_id,
             "entrada":  estado.tiempo_entrada,
             "salida":   None,
-            "ultima_deteccion": personas_ultima_det.get(estado.track_id),
-            "entrada_observada": estado.tiempo_entrada_observada or estado.tiempo_entrada,
         })
-
-    # Los ausentes al final no se deben exportar como físicamente presentes.
-    for tid in personas_ausentes:
-        personas_en_zona.pop(tid, None)
 
     # ── Guardar cola para el siguiente video ──────────────────────────────────
     # Se llama DESPUÉS de añadir las personas restantes a periodos_persona para
@@ -1035,10 +919,7 @@ def procesar_video(
     print(f"      Buses confirmados  : {len(llegadas_bus_confirmadas)}")
     print(f"      Periodos de persona: {len(periodos_persona)}")
 
-    diagnostico = []
-    registros = calcular_tiempos_espera(
-        llegadas_bus_confirmadas, periodos_persona, diagnostico
-    )
+    registros = calcular_tiempos_espera(llegadas_bus_confirmadas, periodos_persona)
 
     vistos: set = set()
     registros_unicos = []
@@ -1051,21 +932,6 @@ def procesar_video(
             vistos.add(tid)
             registros_unicos.append(r)
     registros = registros_unicos
-
-    diagnostico_path = Path(output_dir) / f"{nombre_base}_v4_diagnostico.json"
-    with open(diagnostico_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "video": video_path,
-            "persona_gap_tol_seg": PERSONA_GAP_TOL_SEG,
-            "persona_occlusion_max_seg": PERSONA_OCLUSION_MAX_SEG,
-            "min_observacion_candidato_seg": MIN_OBSERVACION_CANDIDATO_SEG,
-            "max_salida_candidato_seg": MAX_SALIDA_CANDIDATO_SEG,
-            "periodos_persona": periodos_persona,
-            "asociaciones": diagnostico,
-            "registros_exportados": registros,
-        }, f, indent=2, ensure_ascii=False,
-            default=lambda t: t.isoformat(sep=" "))
-    print(f"      Diagnóstico: {diagnostico_path}")
 
     n_con_usuarios = sum(1 for r in registros if r["track_id_persona"] != -1)
     n_solo_bus     = sum(1 for r in registros if r["track_id_persona"] == -1)
@@ -1149,41 +1015,6 @@ def procesar_video(
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
 
-def procesar_lote(
-    videos: list[str],
-    timestamps_inicio: list[str],
-    zonas_path: str,
-    modelo_nombre: str = "yolov8m.pt",
-    guardar_video: bool = False,
-    output_dir: str = "output",
-    cola_anterior_path: str | None = None,
-) -> None:
-    """Procesa videos cronológicamente y encadena sus colas automáticamente."""
-    if len(videos) != len(timestamps_inicio):
-        raise ValueError(
-            "La cantidad de videos debe coincidir con la cantidad de timestamps de inicio."
-        )
-
-    cola_actual = cola_anterior_path
-    total = len(videos)
-    for indice, (video_path, timestamp_inicio) in enumerate(
-        zip(videos, timestamps_inicio), start=1
-    ):
-        print(f"\n{'#' * 60}\n  Lote: video {indice}/{total}\n{'#' * 60}")
-        procesar_video(
-            video_path=video_path,
-            zonas_path=zonas_path,
-            timestamp_inicio=timestamp_inicio,
-            modelo_nombre=modelo_nombre,
-            guardar_video=guardar_video,
-            output_dir=output_dir,
-            cola_anterior_path=cola_actual,
-        )
-
-        # procesar_video siempre escribe esta cola, incluso cuando está vacía.
-        cola_actual = str(Path(output_dir) / f"{Path(video_path).stem}_v4_cola.json")
-
-
 def main() -> None:
     p = argparse.ArgumentParser(
         description=(
@@ -1191,14 +1022,10 @@ def main() -> None:
             "carry-over entre videos consecutivos"
         )
     )
-    p.add_argument("video", nargs="?",
-        help="Ruta a un video de vigilancia")
-    p.add_argument("--timestamp-inicio",
+    p.add_argument("video",
+        help="Ruta al video de vigilancia")
+    p.add_argument("--timestamp-inicio", required=True,
         help="Timestamp del primer frame del video: 'YYYY-MM-DD HH:MM:SS'")
-    p.add_argument("--videos", nargs="+", metavar="VIDEO",
-        help="Lista cronológica de videos para procesarlos como lote")
-    p.add_argument("--timestamps-inicio", nargs="+", metavar="TIMESTAMP",
-        help="Timestamps, en el mismo orden que --videos")
     p.add_argument("--zonas", default="zonas.json",
         help="Archivo generado por setup_zones.py (default: zonas.json)")
     p.add_argument("--modelo", default="yolov8m.pt",
@@ -1220,40 +1047,15 @@ def main() -> None:
 
     args = p.parse_args()
 
-    if args.videos:
-        if args.video:
-            p.error("Usa un video posicional o --videos, no ambos.")
-        if args.timestamp_inicio:
-            p.error("Para un lote usa --timestamps-inicio, no --timestamp-inicio.")
-        if not args.timestamps_inicio:
-            p.error("--videos requiere --timestamps-inicio.")
-        if len(args.videos) != len(args.timestamps_inicio):
-            p.error("--videos y --timestamps-inicio deben tener la misma cantidad de valores.")
-
-        procesar_lote(
-            videos=args.videos,
-            timestamps_inicio=args.timestamps_inicio,
-            zonas_path=args.zonas,
-            modelo_nombre=args.modelo,
-            guardar_video=args.guardar_video,
-            output_dir=args.output,
-            cola_anterior_path=args.cola_anterior,
-        )
-    else:
-        if not args.video:
-            p.error("Indica un video o usa --videos para procesar un lote.")
-        if not args.timestamp_inicio:
-            p.error("El argumento --timestamp-inicio es obligatorio para un video.")
-
-        procesar_video(
-            video_path         = args.video,
-            zonas_path         = args.zonas,
-            timestamp_inicio   = args.timestamp_inicio,
-            modelo_nombre      = args.modelo,
-            guardar_video      = args.guardar_video,
-            output_dir         = args.output,
-            cola_anterior_path = args.cola_anterior,
-        )
+    procesar_video(
+        video_path         = args.video,
+        zonas_path         = args.zonas,
+        timestamp_inicio   = args.timestamp_inicio,
+        modelo_nombre      = args.modelo,
+        guardar_video      = args.guardar_video,
+        output_dir         = args.output,
+        cola_anterior_path = args.cola_anterior,
+    )
 
 
 if __name__ == "__main__":
