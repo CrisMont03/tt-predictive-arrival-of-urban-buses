@@ -71,6 +71,7 @@ el match por posición es unívoco; los casos ambiguos se omiten (igual que v3).
 import argparse
 import csv
 import json
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -78,7 +79,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from tqdm import tqdm
 from ultralytics import YOLO
 
 import supervision as sv
@@ -96,7 +96,7 @@ FRAME_INTERVAL = 3
 MIN_DWELL_BUS_SEG = 0.2 #0.1
 BUS_GAP_TOL_SEG   = 3.0
 CONF_BUS_MIN      = 0.30
-BUS_RATIO_MIN     = 1.7 #1.3, 1.1
+BUS_RATIO_MIN     = 1.6 #1.3, 1.1
 BUS_AREA_FRAC     = 0.02
 BUS_HSV_BAJO      = np.array([15, 25, 140])
 BUS_HSV_ALTO      = np.array([32, 180, 255])
@@ -119,7 +119,7 @@ MIN_PRESENCIA_PERSONA_SEG = 1.2
 COOLDOWN_REENTRADA_SEG    = 20.0
 PERSONA_GAP_TOL_SEG      = 3.0
 PERSONA_OCLUSION_MAX_SEG = 15.0
-MIN_OBSERVACION_CANDIDATO_SEG = 5.0
+MIN_OBSERVACION_CANDIDATO_SEG = 2.5
 MAX_SALIDA_CANDIDATO_SEG      = 75.0
 
 ID_SWITCH_VENTANA_SEG = 25.0
@@ -215,6 +215,8 @@ def calcular_metricas_bus(frame: np.ndarray, bbox, w_vid: int, h_vid: int) -> di
         metricas["pasa_blanco"]   = frac_blanco   <  BUS_BLANCO_FRAC_MAX
         metricas["pasa_purpura"]  = frac_purpura  <  BUS_PURPURA_FRAC_MAX
         metricas["pasa_color"]    = frac_amarillo >= BUS_COLOR_FRAC and frac_verde > BUS_COLOR_VERDE_FRAC
+        metricas["pasa_amarillo"] = frac_amarillo >= BUS_COLOR_FRAC
+        metricas["pasa_verde"]    = frac_verde > BUS_COLOR_VERDE_FRAC
 
     return metricas
 
@@ -244,6 +246,51 @@ def es_bus_objetivo(frame: np.ndarray, bbox) -> bool:
     frac_verde    = np.sum(cv2.inRange(hsv, BUS_HSV_VERDE_BAJO, BUS_HSV_VERDE_ALTO) > 0) / total
 
     return frac_amarillo >= BUS_COLOR_FRAC and frac_verde > BUS_COLOR_VERDE_FRAC
+
+
+def diagnosticar_detecciones_bus(frame, detecciones, zona, w_vid, h_vid) -> list:
+    """Observa la salida de YOLO sin modificar las detecciones del pipeline."""
+    buses = detecciones[detecciones.class_id == CLASE_BUS]
+    if len(buses) == 0:
+        return [{"deteccion": -1, "resultado": "sin_bus_en_salida_yolo"}]
+    en_roi = zona.trigger(detections=buses)
+    filas = []
+    for i, bbox in enumerate(buses.xyxy):
+        m = calcular_metricas_bus(frame, bbox, w_vid, h_vid)
+        ancho, alto = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        confianza = float(buses.confidence[i]) if buses.confidence is not None else None
+        pasa_confianza = confianza is None or confianza >= CONF_BUS_MIN
+        pasa_ratio = ancho / (alto + 1e-6) >= BUS_RATIO_MIN
+        pasa_area = ancho * alto >= w_vid * h_vid * BUS_AREA_FRAC
+        x1, y1, x2, y2 = m["bbox"]
+        bbox_valido = x2 - x1 >= 10 and y2 - y1 >= 10
+        rechazos = []
+        for nombre, pasa in [
+            ("confianza", pasa_confianza), ("ratio", pasa_ratio),
+            ("area", pasa_area), ("bbox_o_recorte", bbox_valido and m["frac_blanco"] is not None),
+            ("blanco", m["pasa_blanco"]), ("purpura", m["pasa_purpura"]),
+            ("amarillo", m.get("pasa_amarillo")), ("verde", m.get("pasa_verde")),
+        ]:
+            if not pasa:
+                rechazos.append(nombre)
+        aceptada = not rechazos
+        filas.append({
+            "deteccion": i, "confianza": confianza,
+            "x1": float(bbox[0]), "y1": float(bbox[1]),
+            "x2": float(bbox[2]), "y2": float(bbox[3]),
+            "ratio": float(ancho / (alto + 1e-6)),
+            "area_frac": float(ancho * alto / (w_vid * h_vid)),
+            "frac_blanco": m["frac_blanco"], "frac_purpura": m["frac_purpura"],
+            "frac_amarillo": m["frac_amarillo"], "frac_verde": m["frac_verde"],
+            "pasa_confianza": bool(pasa_confianza), "pasa_ratio": bool(pasa_ratio),
+            "pasa_area": bool(pasa_area), "pasa_color": bool(bbox_valido and m["pasa_color"]),
+            "aceptada_filtros": aceptada, "en_roi": bool(en_roi[i]),
+            "rechazos": "|".join(rechazos),
+            "resultado": "rechazada_filtros" if rechazos else (
+                "aceptada_en_roi" if en_roi[i] else "aceptada_fuera_roi"
+            ),
+        })
+    return filas
 
 
 def extraer_ids_sin_tracker(det: sv.Detections, zona: sv.PolygonZone) -> set:
@@ -484,7 +531,7 @@ def calcular_tiempos_espera(
     """
     Para cada bus confirmado:
       - Si había personas esperando → genera una fila por persona.
-      - Si salieron, admite candidatos observados al menos 5 segundos y cuya
+      - Si salieron, admite candidatos observados al menos 2.5 segundos y cuya
         salida ocurrió como máximo 75 segundos antes del bus.
       - Si NO había personas esperando → genera fila solo-bus (track_id=-1).
 
@@ -643,6 +690,9 @@ def procesar_video(
     guardar_video:      bool      = False,
     output_dir:         str       = "output",
     cola_anterior_path: str | None = None,
+    diagnostico_buses: bool = False,
+    diagnostico_buses_inicio: float = 0.0,
+    diagnostico_buses_fin: float | None = None,
 ) -> None:
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -668,6 +718,8 @@ def procesar_video(
         polygon=roi_person_pts,
         triggering_anchors=[sv.Position.CENTER],
     )
+    # Instancia independiente: observar el ROI no altera zona_bus.current_count.
+    zona_bus_diagnostico = sv.PolygonZone(polygon=roi_bus_pts) if diagnostico_buses else None
 
     # ── Cargar candidatos de la cola anterior ─────────────────────────────────
     cola_candidatos: list[dict]        = []
@@ -678,10 +730,6 @@ def procesar_video(
         cola_candidatos = cargar_cola(cola_anterior_path)
         print(f"[Cola] {len(cola_candidatos)} candidato(s) carry-over cargado(s) "
               f"desde {cola_anterior_path}")
-        for i, c in enumerate(cola_candidatos):
-            print(f"       [{i}] arrival_user={c['arrival_user']}  "
-                  f"centroide={c['last_centroid']}")
-        print()
 
     print(f"[1/5] Cargando {modelo_nombre}  (device={device}) ...")
     modelo = YOLO(modelo_nombre)
@@ -695,7 +743,6 @@ def procesar_video(
     cap_meta.release()
 
     fps_efectivo = fps_real / FRAME_INTERVAL
-    frames_proc  = total_frames // FRAME_INTERVAL
 
     print(f"[2/5] {fps_real:.1f} fps  |  {total_frames} frames totales  |  "
             f"procesando 1 de cada {FRAME_INTERVAL} → {fps_efectivo:.1f} fps efectivos\n")
@@ -751,7 +798,23 @@ def procesar_video(
     cap      = cv2.VideoCapture(video_path)
     frame_id = 0
 
-    with tqdm(total=frames_proc, unit="frame", ncols=72) as pbar:
+    with ExitStack() as recursos:
+        escritor_diag_bus = None
+        if diagnostico_buses:
+            ruta_diag_bus = Path(output_dir) / f"{nombre_base}_v4_diagnostico_buses.csv"
+            archivo_diag_bus = recursos.enter_context(ruta_diag_bus.open("w", newline="", encoding="utf-8"))
+            campos = [
+                "timestamp", "frame_id", "seg_desde_inicio", "deteccion", "confianza",
+                "x1", "y1", "x2", "y2", "ratio", "area_frac", "frac_blanco",
+                "frac_purpura", "frac_amarillo", "frac_verde", "pasa_confianza",
+                "pasa_ratio", "pasa_area", "pasa_color", "aceptada_filtros", "en_roi",
+                "rechazos", "resultado", "hay_bus_zona", "activa_antes", "confirmado_antes",
+                "dwell_antes", "gap_antes_seg", "cooldown_ok", "activa_despues",
+                "confirmado_despues", "dwell_despues", "nueva_llegada", "estado_confirmacion",
+            ]
+            escritor_diag_bus = csv.DictWriter(archivo_diag_bus, fieldnames=campos)
+            escritor_diag_bus.writeheader()
+            print(f"      Diagnóstico de buses: {ruta_diag_bus}")
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -775,6 +838,23 @@ def procesar_video(
             )[0]
 
             det_all = sv.Detections.from_ultralytics(resultado)
+            filas_diag_bus = None
+            if escritor_diag_bus is not None and seg_desde_inicio >= diagnostico_buses_inicio and (
+                diagnostico_buses_fin is None or seg_desde_inicio <= diagnostico_buses_fin
+            ):
+                filas_diag_bus = diagnosticar_detecciones_bus(
+                    frame, det_all, zona_bus_diagnostico, w_vid, h_vid
+                )
+                estado_diag_bus = {
+                    "timestamp": t_actual.isoformat(sep=" "), "frame_id": frame_id,
+                    "seg_desde_inicio": seg_desde_inicio,
+                    "activa_antes": bus_zona_activa, "confirmado_antes": bus_zona_confirmado,
+                    "dwell_antes": bus_zona_dwell_acum,
+                    "gap_antes_seg": (t_actual - bus_zona_ultimo_det).total_seconds()
+                        if bus_zona_ultimo_det is not None else None,
+                    "cooldown_ok": puede_confirmar_bus(t_actual, llegadas_bus_confirmadas),
+                }
+                n_llegadas_antes = len(llegadas_bus_confirmadas)
 
             bus_mask = det_all.class_id == CLASE_BUS
             if np.any(bus_mask) and det_all.confidence is not None:
@@ -869,7 +949,7 @@ def procesar_video(
                                 f"  ║  Cooldown OK     : ✓  (último bus hace >{COOLDOWN_BUS_SEG}s)\n"
                                 f"  ╚════════════════════════════════════════════════╝\n"
                             )
-                            tqdm.write(bloque)
+                            print(bloque)
                             metricas_txt_lines.append(bloque)
             else:
                 if bus_zona_activa and bus_zona_ultimo_det is not None:
@@ -882,6 +962,29 @@ def procesar_video(
                         bus_zona_entrada    = None
                         bus_zona_confirmado = False
                         bus_zona_dwell_acum = 0.0
+
+            if filas_diag_bus is not None:
+                nueva_llegada = len(llegadas_bus_confirmadas) > n_llegadas_antes
+                if nueva_llegada:
+                    estado_confirmacion = "llegada_confirmada"
+                elif not hay_bus_zona:
+                    estado_confirmacion = "sin_bus_aceptado_en_roi"
+                elif bus_zona_confirmado:
+                    estado_confirmacion = "evento_ya_confirmado"
+                elif bus_zona_dwell_acum < MIN_DWELL_BUS_SEG:
+                    estado_confirmacion = "dwell_insuficiente"
+                else:
+                    estado_confirmacion = "bloqueado_por_cooldown"
+                estado_diag_bus.update({
+                    "hay_bus_zona": hay_bus_zona,
+                    "activa_despues": bus_zona_activa,
+                    "confirmado_despues": bus_zona_confirmado,
+                    "dwell_despues": bus_zona_dwell_acum,
+                    "nueva_llegada": nueva_llegada,
+                    "estado_confirmacion": estado_confirmacion,
+                })
+                for fila in filas_diag_bus:
+                    escritor_diag_bus.writerow({**estado_diag_bus, **fila})
 
             # ════════════════════════════════════════════════════════════════
             # LÓGICA DE PERSONAS
@@ -917,11 +1020,6 @@ def procesar_video(
                                 cola_candidatos[idx_match]["arrival_user"]
                             )
                             tid_a_arrival_real[tid] = t_real
-                            tqdm.write(
-                                f"  Cola match | track={tid:3d} | "
-                                f"arrival_real={t_real.strftime('%H:%M:%S')} "
-                                f"(dist={dist_match:.1f}px)"
-                            )
 
                 personas_pendientes[tid] = t_actual
 
@@ -937,10 +1035,6 @@ def procesar_video(
                 t_observada = t_arr
                 t_arr = tid_a_arrival_real.pop(tid, t_arr)
                 personas_en_zona[tid] = EstadoPersona(tid, t_arr, t_observada)
-                tqdm.write(
-                    f"  Persona    | track={tid:3d} | "
-                    f"llego {t_arr.strftime('%H:%M:%S')}"
-                )
 
             for tid in ids_persona_prev - ids_persona_actual:
                 personas_pendientes.pop(tid, None)
@@ -989,11 +1083,30 @@ def procesar_video(
                 writer.write(frame_out)
 
             frame_id += 1
-            pbar.update(1)
 
     cap.release()
     if writer:
         writer.release()
+    if diagnostico_buses:
+        resumen_path = Path(output_dir) / f"{nombre_base}_v4_diagnostico_buses_resumen.json"
+        with resumen_path.open("w", encoding="utf-8") as f:
+            json.dump({
+                "video": video_path, "timestamp_inicio": timestamp_inicio,
+                "inicio_diagnostico_seg": diagnostico_buses_inicio,
+                "fin_diagnostico_seg": diagnostico_buses_fin,
+                "frames_leidos": frame_id, "frames_esperados": total_frames,
+                "lectura_completa_segun_metadata": total_frames > 0 and frame_id >= total_frames,
+                "ultimo_frame_procesado_seg": ((frame_id - 1) // FRAME_INTERVAL * FRAME_INTERVAL) / fps_real
+                    if frame_id else None,
+                "limites": {
+                    "conf_yolo": 0.25, "conf_bus": CONF_BUS_MIN, "ratio_min": BUS_RATIO_MIN,
+                    "area_frac_min": BUS_AREA_FRAC, "blanco_max": BUS_BLANCO_FRAC_MAX,
+                    "purpura_max": BUS_PURPURA_FRAC_MAX, "amarillo_min": BUS_COLOR_FRAC,
+                    "verde_min_exclusivo": BUS_COLOR_VERDE_FRAC,
+                    "dwell_min_seg": MIN_DWELL_BUS_SEG, "gap_tol_seg": BUS_GAP_TOL_SEG,
+                    "cooldown_seg": COOLDOWN_BUS_SEG,
+                },
+            }, f, indent=2, ensure_ascii=False)
 
     # Personas aún en zona al terminar el video
     for estado in personas_en_zona.values():
@@ -1157,6 +1270,9 @@ def procesar_lote(
     guardar_video: bool = False,
     output_dir: str = "output",
     cola_anterior_path: str | None = None,
+    diagnostico_buses: bool = False,
+    diagnostico_buses_inicio: float = 0.0,
+    diagnostico_buses_fin: float | None = None,
 ) -> None:
     """Procesa videos cronológicamente y encadena sus colas automáticamente."""
     if len(videos) != len(timestamps_inicio):
@@ -1178,6 +1294,9 @@ def procesar_lote(
             guardar_video=guardar_video,
             output_dir=output_dir,
             cola_anterior_path=cola_actual,
+            diagnostico_buses=diagnostico_buses,
+            diagnostico_buses_inicio=diagnostico_buses_inicio,
+            diagnostico_buses_fin=diagnostico_buses_fin,
         )
 
         # procesar_video siempre escribe esta cola, incluso cuando está vacía.
@@ -1207,6 +1326,12 @@ def main() -> None:
         help="Exportar video anotado para verificacion visual")
     p.add_argument("--output", default="output",
         help="Directorio de salida (default: output/)")
+    p.add_argument("--diagnostico-buses", action="store_true",
+        help="Exportar CSV de detecciones de buses, filtros, ROI y confirmación; no cambia las decisiones")
+    p.add_argument("--diagnostico-buses-inicio", type=float, default=0.0, metavar="SEG",
+        help="Inicio del registro en segundos desde cada video (no recorta el procesamiento)")
+    p.add_argument("--diagnostico-buses-fin", type=float, default=None, metavar="SEG",
+        help="Fin del registro en segundos desde cada video; por defecto registra hasta el final")
     p.add_argument("--cola-anterior",
         default=None,
         metavar="COLA_JSON",
@@ -1219,6 +1344,10 @@ def main() -> None:
     )
 
     args = p.parse_args()
+    if args.diagnostico_buses_inicio < 0:
+        p.error("--diagnostico-buses-inicio debe ser >= 0.")
+    if args.diagnostico_buses_fin is not None and args.diagnostico_buses_fin < args.diagnostico_buses_inicio:
+        p.error("--diagnostico-buses-fin debe ser >= --diagnostico-buses-inicio.")
 
     if args.videos:
         if args.video:
@@ -1238,6 +1367,9 @@ def main() -> None:
             guardar_video=args.guardar_video,
             output_dir=args.output,
             cola_anterior_path=args.cola_anterior,
+            diagnostico_buses=args.diagnostico_buses,
+            diagnostico_buses_inicio=args.diagnostico_buses_inicio,
+            diagnostico_buses_fin=args.diagnostico_buses_fin,
         )
     else:
         if not args.video:
@@ -1253,6 +1385,9 @@ def main() -> None:
             guardar_video      = args.guardar_video,
             output_dir         = args.output,
             cola_anterior_path = args.cola_anterior,
+            diagnostico_buses = args.diagnostico_buses,
+            diagnostico_buses_inicio = args.diagnostico_buses_inicio,
+            diagnostico_buses_fin = args.diagnostico_buses_fin,
         )
 
 
