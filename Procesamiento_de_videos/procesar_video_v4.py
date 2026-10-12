@@ -75,6 +75,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -82,6 +83,7 @@ import torch
 from ultralytics import YOLO
 
 import supervision as sv
+from video_pipeline import FrameReader, ordered_inference
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ FRAME_INTERVAL = 3
 MIN_DWELL_BUS_SEG = 0.2 #0.1
 BUS_GAP_TOL_SEG   = 3.0
 CONF_BUS_MIN      = 0.30
-BUS_RATIO_MIN     = 1.6 #1.3, 1.1
+BUS_RATIO_MIN     = 1.5 #1.3, 1.1
 BUS_AREA_FRAC     = 0.02
 BUS_HSV_BAJO      = np.array([15, 25, 140])
 BUS_HSV_ALTO      = np.array([32, 180, 255])
@@ -104,7 +106,7 @@ BUS_COLOR_FRAC    = 0.08
 
 BUS_HSV_VERDE_BAJO   = np.array([35,  40,  80])
 BUS_HSV_VERDE_ALTO   = np.array([85, 255, 255])
-BUS_COLOR_VERDE_FRAC = 0.005 #0, 0.008
+BUS_COLOR_VERDE_FRAC = 0.004 #0, 0.008
 
 BUS_BLANCO_S_MAX    = 30
 BUS_BLANCO_V_MIN    = 150
@@ -693,8 +695,13 @@ def procesar_video(
     diagnostico_buses: bool = False,
     diagnostico_buses_inicio: float = 0.0,
     diagnostico_buses_fin: float | None = None,
+    prefetch_frames: int = 2,
+    batch_size: int = 1,
 ) -> None:
 
+    if prefetch_frames < 0 or batch_size < 1:
+        raise ValueError("prefetch_frames debe ser >= 0 y batch_size >= 1")
+    inicio_ejecucion = perf_counter()
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     nombre_base = Path(video_path).stem
 
@@ -702,6 +709,7 @@ def procesar_video(
     print(f"  Video : {video_path}")
     print(f"  Inicio: {timestamp_inicio}")
     print(f"  Modo  : v4 (matching por posición para carry-over entre videos)")
+    print(f"  Lectura anticipada: {prefetch_frames} frames | lote YOLO: {batch_size}")
     if cola_anterior_path:
         print(f"  Cola  : {cola_anterior_path}")
     print(f"{'='*60}\n")
@@ -795,10 +803,16 @@ def procesar_video(
 
     # ── Loop principal ────────────────────────────────────────────────────────
     print("[3/5] Procesando frames...\n")
-    cap      = cv2.VideoCapture(video_path)
-    frame_id = 0
+    tiempos_inferencia = {}
+    tiempo_estado = 0.0
+    inicio_frames = perf_counter()
 
     with ExitStack() as recursos:
+        lector = recursos.enter_context(FrameReader(
+            video_path, interval=FRAME_INTERVAL, prefetch=prefetch_frames
+        ))
+        if writer is not None:
+            recursos.callback(writer.release)
         escritor_diag_bus = None
         if diagnostico_buses:
             ruta_diag_bus = Path(output_dir) / f"{nombre_base}_v4_diagnostico_buses.csv"
@@ -815,27 +829,14 @@ def procesar_video(
             escritor_diag_bus = csv.DictWriter(archivo_diag_bus, fieldnames=campos)
             escritor_diag_bus.writeheader()
             print(f"      Diagnóstico de buses: {ruta_diag_bus}")
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if frame_id % FRAME_INTERVAL != 0:
-                frame_id += 1
-                continue
-
+        for frame_id, frame, resultado in ordered_inference(
+            lector, modelo, batch_size=batch_size, stats=tiempos_inferencia,
+            device=device, classes=[CLASE_PERSONA, CLASE_BUS],
+            conf=0.25, imgsz=1280, verbose=False,
+        ):
+            inicio_estado = perf_counter()
             t_actual         = frame_a_tiempo(frame_id, fps_real, t_inicio)
             seg_desde_inicio = (t_actual - t_inicio).total_seconds()
-
-            # ── Detección ────────────────────────────────────────────────────
-            resultado = modelo(
-                frame,
-                device  = device,
-                classes = [CLASE_PERSONA, CLASE_BUS],
-                conf    = 0.25,
-                imgsz   = 1280,
-                verbose = False,
-            )[0]
 
             det_all = sv.Detections.from_ultralytics(resultado)
             filas_diag_bus = None
@@ -1082,11 +1083,13 @@ def procesar_video(
                 )
                 writer.write(frame_out)
 
-            frame_id += 1
+            tiempo_estado += perf_counter() - inicio_estado
 
-    cap.release()
-    if writer:
-        writer.release()
+    tiempo_frames = perf_counter() - inicio_frames
+    frame_id = lector.frames_read
+    lectura_completa = total_frames > 0 and frame_id >= total_frames
+    if not lectura_completa:
+        print(f"[AVISO] Lectura incompleta: {frame_id}/{total_frames} frames. Los resultados son parciales.")
     if diagnostico_buses:
         resumen_path = Path(output_dir) / f"{nombre_base}_v4_diagnostico_buses_resumen.json"
         with resumen_path.open("w", encoding="utf-8") as f:
@@ -1096,8 +1099,8 @@ def procesar_video(
                 "fin_diagnostico_seg": diagnostico_buses_fin,
                 "frames_leidos": frame_id, "frames_esperados": total_frames,
                 "lectura_completa_segun_metadata": total_frames > 0 and frame_id >= total_frames,
-                "ultimo_frame_procesado_seg": ((frame_id - 1) // FRAME_INTERVAL * FRAME_INTERVAL) / fps_real
-                    if frame_id else None,
+                "ultimo_frame_procesado_seg": lector.last_sample_id / fps_real
+                    if lector.last_sample_id is not None else None,
                 "limites": {
                     "conf_yolo": 0.25, "conf_bus": CONF_BUS_MIN, "ratio_min": BUS_RATIO_MIN,
                     "area_frac_min": BUS_AREA_FRAC, "blanco_max": BUS_BLANCO_FRAC_MAX,
@@ -1257,6 +1260,25 @@ def procesar_video(
             print(f"  Espera maxima           : {max(tiempos):.2f} min")
         print(f"{'='*60}\n")
 
+    rendimiento_path = Path(output_dir) / f"{nombre_base}_v4_rendimiento.json"
+    with rendimiento_path.open("w", encoding="utf-8") as f:
+        json.dump({
+            "video": video_path, "device": device, "modelo": modelo_nombre,
+            "prefetch_frames": prefetch_frames, "batch_size": batch_size,
+            "frame_interval": FRAME_INTERVAL, "imgsz": 1280,
+            "frames_leidos": lector.frames_read,
+            "frames_esperados": total_frames, "lectura_completa": lectura_completa,
+            "total_seg": perf_counter() - inicio_ejecucion,
+            "procesamiento_frames_seg": tiempo_frames,
+            "lectura_seg": lector.read_seconds,
+            "espera_lector_seg": lector.wait_seconds,
+            "estado_y_exportacion_video_seg": tiempo_estado,
+            **tiempos_inferencia,
+            "nota": "La lectura se solapa con inferencia y estado; los tiempos no son sumables. "
+                "La inferencia mide tiempo de llamada y puede incluir operaciones GPU asíncronas.",
+        }, f, indent=2, ensure_ascii=False)
+    print(f"      Rendimiento: {rendimiento_path}")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -1273,6 +1295,8 @@ def procesar_lote(
     diagnostico_buses: bool = False,
     diagnostico_buses_inicio: float = 0.0,
     diagnostico_buses_fin: float | None = None,
+    prefetch_frames: int = 2,
+    batch_size: int = 1,
 ) -> None:
     """Procesa videos cronológicamente y encadena sus colas automáticamente."""
     if len(videos) != len(timestamps_inicio):
@@ -1297,6 +1321,8 @@ def procesar_lote(
             diagnostico_buses=diagnostico_buses,
             diagnostico_buses_inicio=diagnostico_buses_inicio,
             diagnostico_buses_fin=diagnostico_buses_fin,
+            prefetch_frames=prefetch_frames,
+            batch_size=batch_size,
         )
 
         # procesar_video siempre escribe esta cola, incluso cuando está vacía.
@@ -1326,6 +1352,10 @@ def main() -> None:
         help="Exportar video anotado para verificacion visual")
     p.add_argument("--output", default="output",
         help="Directorio de salida (default: output/)")
+    p.add_argument("--prefetch-frames", type=int, default=2, metavar="N",
+        help="Frames preparados por el hilo lector (default: 2; 0 desactiva lectura anticipada)")
+    p.add_argument("--batch-size", type=int, default=1, metavar="N",
+        help="Imágenes por llamada a YOLO (default: 1; probar 2 con memoria limitada)")
     p.add_argument("--diagnostico-buses", action="store_true",
         help="Exportar CSV de detecciones de buses, filtros, ROI y confirmación; no cambia las decisiones")
     p.add_argument("--diagnostico-buses-inicio", type=float, default=0.0, metavar="SEG",
@@ -1344,6 +1374,8 @@ def main() -> None:
     )
 
     args = p.parse_args()
+    if args.prefetch_frames < 0 or args.batch_size < 1:
+        p.error("--prefetch-frames debe ser >= 0 y --batch-size >= 1.")
     if args.diagnostico_buses_inicio < 0:
         p.error("--diagnostico-buses-inicio debe ser >= 0.")
     if args.diagnostico_buses_fin is not None and args.diagnostico_buses_fin < args.diagnostico_buses_inicio:
@@ -1370,6 +1402,8 @@ def main() -> None:
             diagnostico_buses=args.diagnostico_buses,
             diagnostico_buses_inicio=args.diagnostico_buses_inicio,
             diagnostico_buses_fin=args.diagnostico_buses_fin,
+            prefetch_frames=args.prefetch_frames,
+            batch_size=args.batch_size,
         )
     else:
         if not args.video:
@@ -1388,6 +1422,8 @@ def main() -> None:
             diagnostico_buses = args.diagnostico_buses,
             diagnostico_buses_inicio = args.diagnostico_buses_inicio,
             diagnostico_buses_fin = args.diagnostico_buses_fin,
+            prefetch_frames = args.prefetch_frames,
+            batch_size = args.batch_size,
         )
 
 
