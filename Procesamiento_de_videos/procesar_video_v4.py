@@ -47,16 +47,19 @@ Diferencias respecto a v3:
 También puede procesar un lote ordenado de videos. En ese modo, la cola producida
 por cada video se entrega automáticamente al siguiente.
 
+Dentro de --output, todos los CSV se guardan en datasets/ y los archivos JSON,
+TXT y videos anotados en extra-docs/.
+
 Uso:
     # Paso 1 — procesar video6AM (genera la cola automáticamente):
     python procesar_video_v4.py video6AM.mp4 \\
         --timestamp-inicio "2025-06-02 06:00:00"
-    # → genera: output/video6AM_v4_cola.json
+    # → genera: output/extra-docs/video6AM_v4_cola.json
 
     # Paso 2 — procesar video7AM con la cola del anterior:
     python procesar_video_v4.py video7AM.mp4 \\
         --timestamp-inicio "2025-06-02 07:00:00" \\
-        --cola-anterior output/video6AM_v4_cola.json
+        --cola-anterior output/extra-docs/video6AM_v4_cola.json
 
     # Procesar varios videos consecutivos (una hora de inicio por video):
     python procesar_video_v4.py \\
@@ -98,7 +101,7 @@ FRAME_INTERVAL = 3
 MIN_DWELL_BUS_SEG = 0.2 #0.1
 BUS_GAP_TOL_SEG   = 3.0
 CONF_BUS_MIN      = 0.30
-BUS_RATIO_MIN     = 1.5 #1.3, 1.1
+BUS_RATIO_MIN     = 1.5 #1.5, 1.3, 1.1
 BUS_AREA_FRAC     = 0.02
 BUS_HSV_BAJO      = np.array([15, 25, 140])
 BUS_HSV_ALTO      = np.array([32, 180, 255])
@@ -106,11 +109,11 @@ BUS_COLOR_FRAC    = 0.08
 
 BUS_HSV_VERDE_BAJO   = np.array([35,  40,  80])
 BUS_HSV_VERDE_ALTO   = np.array([85, 255, 255])
-BUS_COLOR_VERDE_FRAC = 0.004 #0, 0.008
+BUS_COLOR_VERDE_FRAC = 0 #0.004, 0, 0.008
 
 BUS_BLANCO_S_MAX    = 30
 BUS_BLANCO_V_MIN    = 150
-BUS_BLANCO_FRAC_MAX = 0.17 # 0.15, 0.2
+BUS_BLANCO_FRAC_MAX = 0.17 #0.17, 0.15, 0.2
 
 BUS_HSV_PURPURA_BAJO  = np.array([100,  50,  50])
 BUS_HSV_PURPURA_ALTO  = np.array([160, 255, 255])
@@ -702,7 +705,10 @@ def procesar_video(
     if prefetch_frames < 0 or batch_size < 1:
         raise ValueError("prefetch_frames debe ser >= 0 y batch_size >= 1")
     inicio_ejecucion = perf_counter()
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    datasets_dir = Path(output_dir) / "datasets"
+    extra_docs_dir = Path(output_dir) / "extra-docs"
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+    extra_docs_dir.mkdir(parents=True, exist_ok=True)
     nombre_base = Path(video_path).stem
 
     print(f"\n{'='*60}")
@@ -797,7 +803,7 @@ def procesar_video(
     writer       = None
     ruta_vid_out = None
     if guardar_video:
-        ruta_vid_out = str(Path(output_dir) / f"{nombre_base}_anotado_v4.mp4")
+        ruta_vid_out = str(extra_docs_dir / f"{nombre_base}_anotado_v4.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(ruta_vid_out, fourcc, fps_efectivo, (w_vid, h_vid))
 
@@ -806,6 +812,8 @@ def procesar_video(
     tiempos_inferencia = {}
     tiempo_estado = 0.0
     inicio_frames = perf_counter()
+    intervalo_progreso_seg = 5 * 60
+    siguiente_progreso_seg = intervalo_progreso_seg
 
     with ExitStack() as recursos:
         lector = recursos.enter_context(FrameReader(
@@ -815,7 +823,7 @@ def procesar_video(
             recursos.callback(writer.release)
         escritor_diag_bus = None
         if diagnostico_buses:
-            ruta_diag_bus = Path(output_dir) / f"{nombre_base}_v4_diagnostico_buses.csv"
+            ruta_diag_bus = datasets_dir / f"{nombre_base}_v4_diagnostico_buses.csv"
             archivo_diag_bus = recursos.enter_context(ruta_diag_bus.open("w", newline="", encoding="utf-8"))
             campos = [
                 "timestamp", "frame_id", "seg_desde_inicio", "deteccion", "confianza",
@@ -837,6 +845,17 @@ def procesar_video(
             inicio_estado = perf_counter()
             t_actual         = frame_a_tiempo(frame_id, fps_real, t_inicio)
             seg_desde_inicio = (t_actual - t_inicio).total_seconds()
+
+            if seg_desde_inicio >= siguiente_progreso_seg:
+                print(
+                    f"[Progreso] {nombre_base} | "
+                    f"Hora del video: {t_actual.strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"Analizados: {seg_desde_inicio / 60:.1f} min",
+                    flush=True,
+                )
+                siguiente_progreso_seg = (
+                    int(seg_desde_inicio // intervalo_progreso_seg) + 1
+                ) * intervalo_progreso_seg
 
             det_all = sv.Detections.from_ultralytics(resultado)
             filas_diag_bus = None
@@ -1091,7 +1110,7 @@ def procesar_video(
     if not lectura_completa:
         print(f"[AVISO] Lectura incompleta: {frame_id}/{total_frames} frames. Los resultados son parciales.")
     if diagnostico_buses:
-        resumen_path = Path(output_dir) / f"{nombre_base}_v4_diagnostico_buses_resumen.json"
+        resumen_path = extra_docs_dir / f"{nombre_base}_v4_diagnostico_buses_resumen.json"
         with resumen_path.open("w", encoding="utf-8") as f:
             json.dump({
                 "video": video_path, "timestamp_inicio": timestamp_inicio,
@@ -1133,7 +1152,7 @@ def procesar_video(
     # ── Guardar cola para el siguiente video ──────────────────────────────────
     # Se llama DESPUÉS de añadir las personas restantes a periodos_persona para
     # que guardar_cola tenga acceso completo a ambos grupos.
-    cola_path = Path(output_dir) / f"{nombre_base}_v4_cola.json"
+    cola_path = extra_docs_dir / f"{nombre_base}_v4_cola.json"
     n_cola = guardar_cola(
         personas_en_zona,
         periodos_persona,
@@ -1168,7 +1187,7 @@ def procesar_video(
             registros_unicos.append(r)
     registros = registros_unicos
 
-    diagnostico_path = Path(output_dir) / f"{nombre_base}_v4_diagnostico.json"
+    diagnostico_path = extra_docs_dir / f"{nombre_base}_v4_diagnostico.json"
     with open(diagnostico_path, "w", encoding="utf-8") as f:
         json.dump({
             "video": video_path,
@@ -1199,7 +1218,7 @@ def procesar_video(
     # ── Exportar ──────────────────────────────────────────────────────────────
     print(f"\n[5/5] Exportando ...")
 
-    csv_path = Path(output_dir) / f"{nombre_base}_v4_dataset.csv"
+    csv_path = datasets_dir / f"{nombre_base}_v4_dataset.csv"
     CSV_COLS = [
         "track_id_persona", "arrival_user", "bus_arrival",
         "waiting_time_min", "waiting_time_seg",
@@ -1215,7 +1234,7 @@ def procesar_video(
         print("      Sin registros en el dataset.")
         print("      Revisa: timestamp correcto, zonas bien definidas, conf suficiente.")
 
-    eventos_path = Path(output_dir) / f"{nombre_base}_v4_eventos.json"
+    eventos_path = extra_docs_dir / f"{nombre_base}_v4_eventos.json"
     eventos = {
         "video":            video_path,
         "timestamp_inicio": timestamp_inicio,
@@ -1237,7 +1256,7 @@ def procesar_video(
     print(f"      Eventos  : {eventos_path}")
 
     if metricas_txt_lines:
-        metricas_txt_path = Path(output_dir) / f"{nombre_base}_v4_metricas_bus.txt"
+        metricas_txt_path = extra_docs_dir / f"{nombre_base}_v4_metricas_bus.txt"
         with open(metricas_txt_path, "w", encoding="utf-8") as f:
             f.writelines(metricas_txt_lines)
         print(f"      Métricas : {metricas_txt_path}")
@@ -1260,7 +1279,7 @@ def procesar_video(
             print(f"  Espera maxima           : {max(tiempos):.2f} min")
         print(f"{'='*60}\n")
 
-    rendimiento_path = Path(output_dir) / f"{nombre_base}_v4_rendimiento.json"
+    rendimiento_path = extra_docs_dir / f"{nombre_base}_v4_rendimiento.json"
     with rendimiento_path.open("w", encoding="utf-8") as f:
         json.dump({
             "video": video_path, "device": device, "modelo": modelo_nombre,
@@ -1326,7 +1345,7 @@ def procesar_lote(
         )
 
         # procesar_video siempre escribe esta cola, incluso cuando está vacía.
-        cola_actual = str(Path(output_dir) / f"{Path(video_path).stem}_v4_cola.json")
+        cola_actual = str(Path(output_dir) / "extra-docs" / f"{Path(video_path).stem}_v4_cola.json")
 
 
 def main() -> None:
@@ -1351,7 +1370,7 @@ def main() -> None:
     p.add_argument("--guardar-video", action="store_true",
         help="Exportar video anotado para verificacion visual")
     p.add_argument("--output", default="output",
-        help="Directorio de salida (default: output/)")
+        help="Directorio de salida: CSV en datasets/ y demás archivos en extra-docs/ (default: output/)")
     p.add_argument("--prefetch-frames", type=int, default=2, metavar="N",
         help="Frames preparados por el hilo lector (default: 2; 0 desactiva lectura anticipada)")
     p.add_argument("--batch-size", type=int, default=1, metavar="N",

@@ -132,7 +132,7 @@ class PipelineTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 namespace["main"]()
             self.assertTrue(all(c["prefetch_frames"] == 0 and c["batch_size"] == 2 for c in calls[-2:]))
-            self.assertEqual(calls[-1]["cola_anterior_path"], "output/one_v4_cola.json")
+            self.assertEqual(calls[-1]["cola_anterior_path"], "output/extra-docs/one_v4_cola.json")
         finally:
             sys.argv = previous_argv
 
