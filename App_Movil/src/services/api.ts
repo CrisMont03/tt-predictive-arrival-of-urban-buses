@@ -30,7 +30,7 @@ export async function apiRequest<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export function validatePrediction(result: Prediction): Prediction {
-  if (!result.query_id || !Number.isFinite(result.waiting_time_min) || result.waiting_time_min < 0 ||
+  if (!result.query_id || typeof result.station_id !== 'string' || !result.station_id || !Number.isFinite(result.waiting_time_min) || result.waiting_time_min < 0 ||
       !Array.isArray(result.confidence_interval) || result.confidence_interval.length !== 2 ||
       result.confidence_interval.some(n => !Number.isFinite(n) || n < 0) ||
       result.confidence_interval[0] > result.confidence_interval[1] ||

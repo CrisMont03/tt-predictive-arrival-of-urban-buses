@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, test } from 'node:test';
+import { planProfileWrite } from '../../App_Movil/src/services/profile-plan.ts';
 import {
   assertFails,
   assertSucceeds,
@@ -8,7 +9,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import {
   collection, deleteDoc, deleteField, doc, getDoc, getDocs, query,
-  serverTimestamp, setDoc, Timestamp, updateDoc, where,
+  runTransaction, serverTimestamp, setDoc, Timestamp, updateDoc, where,
 } from 'firebase/firestore';
 
 // Guard before initialization: never point this harness at a real service.
@@ -92,7 +93,7 @@ test('Perfil: sin sesión no se puede leer, crear, actualizar ni eliminar', asyn
   await assertFails(deleteDoc(reference));
 });
 
-for (const name of ['A', 'María José', "D’Ávila López", 'A'.repeat(100)]) {
+for (const name of ['A', 'María José', "D’Ávila López", 'A'.repeat(100), '🚌'.repeat(50)]) {
   test(`Nombre válido: ${name.length === 100 ? 'límite de 100 caracteres' : name}`, async () => {
     await assertSucceeds(setDoc(doc(database(), 'users', 'ana'),
       profile({ display_name: name })));
@@ -102,6 +103,7 @@ for (const name of ['A', 'María José', "D’Ávila López", 'A'.repeat(100)]) 
 const invalidNames = [
   ['vacío', ''], ['espacios', '   '], ['tabulaciones', '\t\t'],
   ['espacio no separable', '\u00a0'], ['más de 100 caracteres', 'a'.repeat(101)],
+  ['más de 100 unidades UTF-16 con emojis', '🚌'.repeat(51)],
   ['espacio inicial', ' Ana'], ['espacio final', 'Ana '],
   ['salto de línea', 'Ana\nMaría'], ['retorno de carro', 'Ana\rMaría'],
   ['separador Unicode de línea', 'Ana\u2028María'],
@@ -304,4 +306,45 @@ test('Rutas no previstas y subcolecciones desconocidas permanecen bloqueadas', a
     await assertFails(getDoc(doc(database(), path)));
     await assertFails(setDoc(doc(database(), path), {}));
   }
+});
+
+test('Plan de la app: crear y reintentar no duplica ni cambia la fecha del perfil', async () => {
+  const db = database(); const reference = doc(db, 'users', 'ana');
+  async function apply(name) {
+    await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(reference);
+      const plan = planProfileWrite(snapshot.exists() ? snapshot.data() : undefined,
+        'ana@example.com', name, profile().preferences, serverTimestamp());
+      if (plan.kind === 'create') transaction.set(reference, plan.data);
+      if (plan.kind === 'update') transaction.update(reference, plan.data);
+    });
+  }
+  await apply('  María José  ');
+  const before = (await getDoc(reference)).data();
+  await apply('Nombre anterior de Auth');
+  const after = (await getDoc(reference)).data();
+  assert.equal(after.display_name, 'María José');
+  assert.ok(before.created_at.isEqual(after.created_at));
+  await environment.withSecurityRulesDisabled(async context => {
+    assert.equal((await getDocs(collection(context.firestore(), 'users'))).size, 1);
+  });
+});
+
+test('Plan de la app: migra un perfil anterior sin modificar preferencias o fecha', async () => {
+  const db = database(); const reference = doc(db, 'users', 'ana');
+  const legacy = profile(); delete legacy.display_name;
+  legacy.preferences.gps_enabled = true;
+  await setDoc(reference, legacy);
+  const before = (await getDoc(reference)).data();
+  await runTransaction(db, async transaction => {
+    const snapshot = await transaction.get(reference);
+    const plan = planProfileWrite(snapshot.data(), 'ana@example.com', ' Ana María ',
+      profile().preferences, serverTimestamp());
+    assert.equal(plan.kind, 'update');
+    if (plan.kind === 'update') transaction.update(reference, plan.data);
+  });
+  const after = (await getDoc(reference)).data();
+  assert.equal(after.display_name, 'Ana María');
+  assert.deepEqual(before.preferences, after.preferences);
+  assert.ok(before.created_at.isEqual(after.created_at));
 });

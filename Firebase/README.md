@@ -59,8 +59,8 @@ Las pruebas verifican las reglas locales, sin publicarlas:
 
 Los datos mínimos insertados omitiendo reglas solo preparan casos de prueba locales;
 no validan el contrato completo de los documentos del backend. Las pruebas de
-migración demuestran que los permisos permiten completar un perfil antiguo, no que
-la app ya ejecute esa migración. La validación del backend/IAM requiere otras pruebas.
+migración comprueban los permisos y el plan de escritura compartido con la app.
+La validación del backend/IAM y el flujo completo en un dispositivo requieren otras pruebas.
 
 Las identidades de Auth son simuladas por `@firebase/rules-unit-testing`; no hace
 falta iniciar el emulador Auth ni crear cuentas reales. La limpieza entre pruebas
@@ -69,7 +69,7 @@ sin `FIRESTORE_EMULATOR_HOST` local, falla expresamente para evitar usos ambiguo
 
 ### Resultado de verificación local
 
-El 17 de octubre de 2026 se ejecutó `npm run test:rules`: **55 pruebas aprobadas,
+El 17 de octubre de 2026 se ejecutó `npm run test:rules`: **59 pruebas aprobadas,
 0 fallidas**. El emulador se detuvo al terminar. Esto no es un despliegue ni una
 verificación contra la base real. Los mensajes `PERMISSION_DENIED` de las pruebas
 negativas son esperados: comprueban que operaciones prohibidas sean rechazadas.
@@ -97,10 +97,32 @@ Detener con Ctrl+C. No iniciar simultáneamente dos emuladores en el puerto `808
 - La app sigue conectada al proyecto configurado en su `.env`, no a este emulador.
 - El emulador no exige índices compuestos; estos deben verificarse posteriormente
   contra un proyecto real de desarrollo.
-- Siguiente paso: integrar la escritura y migración de `display_name` en la app,
-  alineando sus validaciones con estas reglas. No habilitar la escritura en la app
-  real hasta publicar reglas probadas en el proyecto de desarrollo correcto.
-- El nombre sigue guardándose solo en Auth en la app actual; esta etapa no cambia eso.
+- La app ya integra escritura, migración y reintento de `display_name`, con validación
+  alineada a las reglas. Las pruebas de la app se ejecutan en `../App_Movil`.
+- Falta publicar las reglas en el proyecto de desarrollo y probar registro,
+  restauración y recuperación con dispositivo/Firebase real. No publicar automáticamente.
+
+## Cuándo y cómo publicar las reglas
+
+1. Ejecutar `npm run test:rules` aquí y `npm run typecheck`, `npm run lint`, `npm test`
+   en `../App_Movil`. Revisar las reglas remotas frente al archivo local antes de reemplazarlas.
+2. Confirmar el ID del proyecto de desarrollo y la base `(default)` utilizados por
+   el `.env` de la app, sin copiar sus credenciales al repositorio.
+3. Publicar **antes de probar la app actualizada contra Firestore real**. No hace
+   falta esperar al entrenamiento del modelo ni al despliegue de Cloud Run.
+4. Se puede usar Firebase Console → Firestore Database → `(default)` → Reglas:
+   copiar el contenido completo de `firestore.rules` y pulsar Publicar. No sustituir
+   por reglas abiertas de prueba ni editarlas de forma distinta al repositorio.
+5. Alternativa recomendada desde esta carpeta: `npx firebase login` y después
+   `npx firebase deploy --only firestore:rules --project TU_PROJECT_ID_DEV`,
+   sustituyendo el ID por el proyecto real de desarrollo. Este comando sí modifica
+   reglas remotas; el proyecto `demo-arribo` es solo para pruebas locales.
+6. Los dos métodos publican reglas; no hace falta utilizar ambos. La CLI permite
+   desplegar el archivo exacto probado/versionado sin copiarlo a mano. Esperar a
+   su propagación antes de interpretar un rechazo como un fallo del código.
+7. Probar registro y perfiles anteriores en la app. Comprobar `display_name` y que
+   `created_at` no cambie al reintentar. Revisar índices por separado en el punto 6;
+   `--only firestore:rules` no despliega los índices ni TTL.
 
 ## Auditoría de dependencias
 

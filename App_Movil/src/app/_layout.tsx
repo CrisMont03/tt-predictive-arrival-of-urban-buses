@@ -5,12 +5,14 @@ import { useEffect } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { ArriboProvider, useArribo } from '@/state/arribo-provider';
 import { usePalette } from '@/components/arribo-ui';
+import { useReducedMotion } from '@/hooks/use-reduced-motion';
 
 void SplashScreen.preventAutoHideAsync();
 function Navigation() {
   const { booting, session } = useArribo(); const p = usePalette();
+  const reduced = useReducedMotion();
   useEffect(() => { if (!booting) void SplashScreen.hideAsync(); }, [booting]);
   if (booting) return <View style={{ flex: 1, justifyContent: 'center', backgroundColor: p.background }}><ActivityIndicator color={p.blue} /></View>;
-  return <><StatusBar style={p.dark ? 'light' : 'dark'} /><Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: p.background } }}><Stack.Protected guard={!session}><Stack.Screen name="(auth)" /></Stack.Protected><Stack.Protected guard={!!session}><Stack.Screen name="(tabs)" /><Stack.Screen name="feedback" options={{ presentation: 'modal' }} /></Stack.Protected></Stack></>;
+  return <><StatusBar style={p.dark ? 'light' : 'dark'} /><Stack screenOptions={{ headerShown: false, animation: reduced ? 'none' : 'default', contentStyle: { backgroundColor: p.background } }}><Stack.Protected guard={!session}><Stack.Screen name="(auth)" /></Stack.Protected><Stack.Protected guard={!!session}><Stack.Screen name="(tabs)" /><Stack.Screen name="feedback" options={{ presentation: 'modal' }} /></Stack.Protected></Stack></>;
 }
 export default function RootLayout() { return <ArriboProvider><Navigation /></ArriboProvider>; }

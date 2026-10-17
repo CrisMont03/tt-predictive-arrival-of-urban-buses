@@ -1,3 +1,9 @@
+export type Station = {
+  id: string; name: string; zone: string; city: string;
+  latitude: number; longitude: number;
+  demonstration: boolean;
+  predictions: { live: boolean; demo: boolean };
+};
 export type Context = {
   hour: number;
   day_of_week: number;
@@ -25,7 +31,7 @@ export type Prediction = {
 };
 
 export type HistoryEntry = Prediction & { requested_at?: string; actual_min?: number; feedback_pending?: boolean };
-export type PendingFeedback = { query_id: string; actual_min: number };
+export type PendingFeedback = { query_id: string; actual_min: number; station_id: string };
 export type Preferences = { preferred_station: string; gps_enabled: boolean; notifications_enabled: boolean };
 export type Alert = {
   id: string;
@@ -37,5 +43,5 @@ export type Alert = {
   created_at: string;
   expires_at: string;
 };
-export type Session = { uid: string; email: string | null; demo: boolean };
+export type Session = { uid: string; email: string | null; displayName?: string | null; demo: boolean };
 export type DemoScenario = 'normal' | 'slow' | 'error' | 'empty';

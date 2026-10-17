@@ -54,20 +54,20 @@ users/{uid}
 - No se exige nombre legal ni apellidos separados.
 
 Las reglas locales ya exigen de 1 a 100 caracteres, sin espacios exteriores ni
-saltos de línea. La app debe alinear su validación y enviar el nombre recortado al
-integrar su escritura. Las reglas rechazan valores inválidos; no los transforman.
+saltos de línea. La app comparte esa validación y envía el nombre recortado.
+Las reglas rechazan valores inválidos; no los transforman.
 
 ### Qué funciona y qué falta
 
 - La app crea el perfil con `ensureProfile()`; Firebase Auth no crea por sí solo
-  el documento de Firestore. Actualmente se guardan correo, fecha y preferencias.
+  el documento de Firestore. El código ahora guarda correo, nombre, fecha y preferencias.
 - El nombre ya se guarda en **Auth** como `displayName`.
-- Las reglas locales ya permiten **`display_name` en Firestore**. Aún falta
-  publicar esas reglas y añadir la escritura a la app; no está habilitado por
-  documentarlo ni por pasar las pruebas locales.
+- Las reglas locales permiten **`display_name` en Firestore** y la app integra su
+  escritura y reintento. Aún falta publicar las reglas y comprobar el flujo en Firebase
+  real; pasar pruebas locales no publica las reglas ni actualiza usuarios reales.
 - Se conservará el nombre en Auth. Guardarlo en ambos servicios requiere dos
   operaciones: una puede completarse aunque la otra quede pendiente.
-- Para cuentas anteriores, se prevé completar el nombre faltante desde Auth si
+- Para cuentas anteriores, se completa el nombre faltante desde Auth si
   está disponible, sin cambiar la fecha ni las preferencias ni sobrescribir un
   nombre existente. Si falta también en Auth, habrá que solicitarlo posteriormente.
 - La transición debe admitir perfiles antiguos sin nombre; no se debe bloquear
@@ -251,7 +251,8 @@ nombre, permisos entre usuarios, campos obligatorios e inmutables, preferencias 
 acceso de clientes a las cinco colecciones. No implementan la migración de la app
 ni validan exhaustivamente los contratos del backend o los índices compuestos.
 
-El siguiente trabajo es integrar la escritura de `display_name` en la app y alinear
-su validación. Antes de usar esa escritura contra Firebase real deben publicarse
-las reglas probadas en el proyecto de desarrollo correcto. No se crean datos
-reales ni se publican cambios por documentar este esquema o ejecutar el emulador.
+La escritura, validación compartida y reintento ya están integrados en la app.
+Antes de usar esa escritura contra Firebase real deben publicarse las reglas
+probadas en el proyecto de desarrollo correcto. Después falta comprobar el flujo
+en dispositivo y la base real. No se crean datos reales ni se publican cambios por
+documentar este esquema o ejecutar el emulador.

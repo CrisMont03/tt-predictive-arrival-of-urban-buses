@@ -1,7 +1,6 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-// @ts-expect-error Node's native TS runner requires the extension.
 import { averageByHour, distanceMeters, parseMinutes } from '../src/utils/metrics.ts';
 import type { HistoryEntry } from '../src/types/arribo';
 
