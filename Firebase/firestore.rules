@@ -2,11 +2,27 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function owner(uid) { return request.auth != null && request.auth.uid == uid; }
+    function validDisplayName(d) {
+      // Optional during migration: previous app versions create profiles without it.
+      // Match JavaScript trim() whitespace too: Rules trim() misses e.g. NBSP.
+      let whitespace = '[\\s\\x{00a0}\\x{1680}\\x{2000}-\\x{200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}\\x{feff}]';
+      return !('display_name' in d) || (
+        d.display_name is string
+        && d.display_name.size() >= 1
+        && d.display_name.size() <= 100
+        && d.display_name == d.display_name.replace('^' + whitespace + '+|' + whitespace + '+$', '')
+        && d.display_name.matches('[^\\r\\n\\x{2028}\\x{2029}]*')
+      );
+    }
     function validProfile() {
       let d = request.resource.data;
-      return d.keys().hasOnly(['email', 'created_at', 'preferences'])
+      return d.keys().hasAll(['email', 'created_at', 'preferences'])
+        && d.keys().hasOnly(['email', 'display_name', 'created_at', 'preferences'])
+        && d.email is string
         && d.email == request.auth.token.email
         && d.created_at is timestamp
+        && validDisplayName(d)
+        && d.preferences is map
         && d.preferences.keys().hasAll(['preferred_station', 'gps_enabled', 'notifications_enabled'])
         && d.preferences.keys().hasOnly(['preferred_station', 'gps_enabled', 'notifications_enabled'])
         && d.preferences.preferred_station == 'rio_consulado'
@@ -17,7 +33,9 @@ service cloud.firestore {
       allow read: if owner(uid);
       allow create: if owner(uid) && validProfile() && request.resource.data.created_at == request.time;
       allow update: if owner(uid) && validProfile()
-        && request.resource.data.created_at == resource.data.created_at;
+        && request.resource.data.created_at == resource.data.created_at
+        // Missing legacy names are allowed, but a saved name cannot be removed.
+        && (!('display_name' in resource.data) || 'display_name' in request.resource.data);
       allow delete: if false;
     }
     match /query_history/{uid}/queries/{queryId} { allow read: if owner(uid); allow write: if false; }

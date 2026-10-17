@@ -14,12 +14,47 @@
 # Archivos de macOS
 .DS_Store
 
-# Local credentials and verification artifacts
-**/.env
+# Local environment values (keep sanitized templates versioned)
+.env
+.env.*
+*.env
+.envrc
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+
+# Administrative credentials and local secret directories
+# Store service-account keys outside the repository whenever possible.
+*service-account*.json
+*service_account*.json
+*serviceAccount*.json
+*ServiceAccount*.json
+*firebase-adminsdk*.json
+application_default_credentials.json
+credentials.json
+*-credentials.json
+client_secret*.json
+secrets/
+.secrets/
+
+# Private keys and application signing material (all project folders)
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+
+# Local dependencies, emulator state and verification artifacts
 **/node_modules/
 **/.pytest_cache/
-**/firebase-debug.log
-**/firestore-debug.log
-**/ui-debug.log
+.firebase/
+*.log
+firebase-debug.log.*
+firestore-debug.log.*
+ui-debug.log.*
 *.keras
 *.backup-*
