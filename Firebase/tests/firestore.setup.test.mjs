@@ -348,3 +348,21 @@ test('Plan de la app: migra un perfil anterior sin modificar preferencias o fech
   assert.deepEqual(before.preferences, after.preferences);
   assert.ok(before.created_at.isEqual(after.created_at));
 });
+
+test('Nombre ingresado en Configuración completa nombres anteriores vacíos o inválidos', async () => {
+  const db = database(); const reference = doc(db, 'users', 'ana');
+  const createdAt = Timestamp.fromMillis(1000);
+  for (const invalid of ['', null, 123, '   ']) {
+    await seed('users/ana', profile({ display_name: invalid, created_at: createdAt }));
+    await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(reference);
+      const plan = planProfileWrite(snapshot.data(), 'ana@example.com', ' Ana María ',
+        profile().preferences, serverTimestamp());
+      assert.equal(plan.kind, 'update');
+      if (plan.kind === 'update') transaction.update(reference, plan.data);
+    });
+    const saved = (await getDoc(reference)).data();
+    assert.equal(saved.display_name, 'Ana María');
+    assert.ok(saved.created_at.isEqual(createdAt));
+  }
+});

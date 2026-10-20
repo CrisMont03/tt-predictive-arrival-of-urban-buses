@@ -18,7 +18,7 @@ export function planProfileWrite<T>(
 ): Plan<T> {
   const normalized = normalizedProfileName(name);
   if (existing) {
-    if (existing.display_name !== undefined || !normalized) return { kind: 'none' };
+    if (normalizedProfileName(existing.display_name) || !normalized) return { kind: 'none' };
     return { kind: 'update', data: { display_name: normalized } };
   }
   if (!email) throw new Error('La cuenta no tiene correo. No se pudo crear su perfil.');

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PasswordValidationStatus } from 'firebase/auth';
-import { emailError, loginErrors, passwordRequirements, registrationErrors } from '../src/utils/auth-validation.ts';
+import { emailError, loginErrors, passwordRecommendations, passwordRequirements, registrationErrors } from '../src/utils/auth-validation.ts';
 import { completeRegistration } from '../src/services/registration.ts';
 
 test('Correo: espacios exteriores permitidos, vacío y formato incorrecto rechazados', () => {
@@ -30,6 +30,32 @@ test('Registro completo crea Auth una vez y completa pasos del perfil en orden',
   const calls: string[] = []; const user = { uid: 'test' };
   const result = await completeRegistration({ create: async () => { calls.push('auth'); return user; }, saveName: async value => { assert.equal(value, user); calls.push('name'); }, ensureProfile: async () => { calls.push('profile'); } });
   assert.deepEqual(calls, ['auth', 'name', 'profile']); assert.deepEqual(result, { user, pending: [] });
+});
+
+test('Política: muestra longitud máxima y todos los requisitos efectivos cuando Firebase los exige', () => {
+  const status = { isValid: false, meetsMinPasswordLength: true, meetsMaxPasswordLength: true,
+    containsLowercaseLetter: true, containsUppercaseLetter: false, containsNumericCharacter: false,
+    containsNonAlphanumericCharacter: false, passwordPolicy: {
+      customStrengthOptions: { minPasswordLength: 8, maxPasswordLength: 64 },
+      allowedNonAlphanumericCharacters: '!@#',
+    },
+  } as PasswordValidationStatus;
+  assert.deepEqual(passwordRequirements(status).map(check => check.label), [
+    'Al menos 8 caracteres', 'Hasta 64 caracteres', 'Una letra minúscula',
+    'Una letra mayúscula', 'Un número', 'Un carácter especial',
+  ]);
+  assert.deepEqual(passwordRecommendations(status, 'abc'), []);
+});
+
+test('Política de seis caracteres no inventa complejidad obligatoria; la separa como recomendación', () => {
+  const status = { isValid: true, meetsMinPasswordLength: true, passwordPolicy: {
+    customStrengthOptions: { minPasswordLength: 6 }, allowedNonAlphanumericCharacters: '!@#',
+  } } as PasswordValidationStatus;
+  assert.deepEqual(passwordRequirements(status), [{ label: 'Al menos 6 caracteres', met: true }]);
+  const suggestions = passwordRecommendations(status, 'Arribo12!');
+  assert.equal(suggestions.length, 5);
+  assert.ok(suggestions.every(check => check.met));
+  assert.ok(passwordRecommendations(status, 'aaaaaa').some(check => !check.met));
 });
 test('Firestore rechazado conserva la cuenta y no repite createUser', async () => {
   let created = 0;

@@ -12,8 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .contracts import Context, FeedbackRequest, PredictRequest, PredictResponse
-from .store import FirestoreStore, MemoryStore
-from .context import fetch_context
+from .store import FeedbackConflict, FeedbackTemporarilyUnavailable, FirestoreStore, MemoryStore
+from .context import cached_sources_valid, fetch_context
 from .predictor import Predictor
 
 
@@ -83,20 +83,22 @@ def create_app(mode=None, store=None, predictor=None):
         local = now.astimezone(ZoneInfo("America/Mexico_City"))
         version = "demo-v1" if mode == "demo" else predictor.metadata["model_version"]
         observations = []
+        context_sources = None
         if mode == "demo":
             external = dict(precipitation_mm=0.0, temp_c=19.0, humidity=65.0, traffic_density=.72, env_alert_active=0)
         else:
             external = await fetch_context()
+            context_sources = external.pop("_sources", None)
             observations = sorted((report for report in store.recent_observations(body.station_id, now - timedelta(hours=2)) if report["received_at"] < now and now - timedelta(hours=2) <= report["query_at"] < now), key=lambda report: report["query_at"])[-20:]
         context = Context(hour=local.hour, day_of_week=local.weekday(), is_weekend=int(local.weekday() >= 5), is_holiday=int(local.date() in holidays.Mexico(years=local.year)), **external)
         revision = hashlib.sha256(json.dumps({"context": context.model_dump(), "history": [(item["query_id"], item["actual_min"]) for item in observations]}, sort_keys=True).encode()).hexdigest()
         key = hashlib.sha256(f"{body.station_id}|{local.date()}|{local.hour}|{version}|{revision}".encode()).hexdigest()
         cached = store.get_cache(key)
-        if cached and cached["expires_at"] > now:
+        if cached and cached["expires_at"] > now and cached_sources_valid(cached.get("context_sources"), datetime.now(timezone.utc)):
             value = {**cached, "source": "cache", "query_id": body.request_id}
         else:
             wait, interval = (12.3, (8, 17)) if mode == "demo" else predictor.predict(context.model_dump(), observations)
-            value = PredictResponse(query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=now, requested_at=now, expires_at=now + timedelta(minutes=5), source="mock" if mode == "demo" else "model", simulation=mode == "demo", context=context).model_dump()
+            value = PredictResponse(query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=now, requested_at=now, expires_at=now + timedelta(minutes=5), source="mock" if mode == "demo" else "model", simulation=mode == "demo", context=context, context_sources=context_sources).model_dump()
             store.set_cache(key, value)
         return store.create_query(uid, body.request_id, {**value, "requested_at": now})
 
@@ -106,9 +108,13 @@ def create_app(mode=None, store=None, predictor=None):
         if not original:
             raise HTTPException(404, {"code": "QUERY_NOT_FOUND", "message": "No se encontró esta consulta en tu cuenta."})
         report = {"query_id": body.query_id, "uid": uid, "station_id": original["station_id"], "actual_min": body.actual_min, "predicted_min": original["waiting_time_min"], "error_min": body.actual_min - original["waiting_time_min"], "context": original["context"], "query_at": original.get("requested_at", original["timestamp"]), "received_at": datetime.now(timezone.utc), "simulation": original["simulation"], "outside_domain": body.actual_min > 45, "model_version": original["model_version"]}
+        if original.get("context_sources") is not None:
+            report["context_sources"] = original["context_sources"]
         try:
             saved = store.save_feedback(uid, body.query_id, report)
-        except ValueError as error:
+        except FeedbackConflict as error:
             raise HTTPException(409, {"code": "FEEDBACK_EXISTS", "message": str(error)})
+        except FeedbackTemporarilyUnavailable:
+            raise HTTPException(503, {"code": "SERVICE_ERROR", "message": "No se pudo confirmar el reporte. Reintenta con la misma consulta y espera."})
         return {"status": "received", "query_id": body.query_id, "simulation": saved["simulation"], "outside_domain": saved["outside_domain"]}
     return app

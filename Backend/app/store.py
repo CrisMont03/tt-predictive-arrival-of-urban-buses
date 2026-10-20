@@ -3,6 +3,14 @@ from datetime import datetime, timezone
 from threading import RLock
 
 
+class FeedbackConflict(ValueError):
+    """A different value was already confirmed for this query."""
+
+
+class FeedbackTemporarilyUnavailable(RuntimeError):
+    """Firestore exhausted transient transaction retries; retry the same request."""
+
+
 class MemoryStore:
     """Only for demonstration and tests. Never selected in production."""
 
@@ -29,7 +37,7 @@ class MemoryStore:
         with self.lock:
             existing = self.reports.get((uid, query_id))
             if existing and existing["actual_min"] != value["actual_min"]:
-                raise ValueError("Ya existe un reporte diferente para esta consulta.")
+                raise FeedbackConflict("Ya existe un reporte diferente para esta consulta.")
             self.reports.setdefault((uid, query_id), deepcopy(value))
             self.queries[(uid, query_id)]["actual_min"] = value["actual_min"]
             return deepcopy(self.reports[(uid, query_id)])
@@ -39,9 +47,11 @@ class MemoryStore:
 
 
 class FirestoreStore:
-    def __init__(self):
-        from firebase_admin import firestore
-        self.db = firestore.client()
+    def __init__(self, db=None):
+        if db is None:
+            from firebase_admin import firestore
+            db = firestore.client()
+        self.db = db
 
     def get_cache(self, key):
         return self.db.collection("predictions").document(key).get().to_dict()
@@ -66,6 +76,7 @@ class FirestoreStore:
 
     def save_feedback(self, uid, query_id, value):
         from firebase_admin import firestore
+        from google.api_core.exceptions import Aborted, DeadlineExceeded, ServiceUnavailable
         ref = self.db.collection("feedback").document(uid).collection("entries").document(query_id)
         history_ref = self.query_ref(uid, query_id)
 
@@ -73,12 +84,21 @@ class FirestoreStore:
         def save(transaction):
             existing = ref.get(transaction=transaction).to_dict()
             if existing and existing["actual_min"] != value["actual_min"]:
-                raise ValueError("Ya existe un reporte diferente para esta consulta.")
+                raise FeedbackConflict("Ya existe un reporte diferente para esta consulta.")
             if not existing:
                 transaction.set(ref, value)
             transaction.update(history_ref, {"actual_min": value["actual_min"]})
             return existing or value
-        return save(self.db.transaction())
+        try:
+            return save(self.db.transaction())
+        except (Aborted, DeadlineExceeded, ServiceUnavailable) as error:
+            raise FeedbackTemporarilyUnavailable() from error
+        except ValueError as error:
+            # The SDK wraps exhausted transaction retries in ValueError from Aborted.
+            # This is not a conflicting feedback value and must not become HTTP 409.
+            if isinstance(error.__cause__, Aborted):
+                raise FeedbackTemporarilyUnavailable() from error
+            raise
 
     def recent_observations(self, station_id, since):
         from google.cloud.firestore_v1.base_query import FieldFilter

@@ -24,3 +24,13 @@ export function passwordRequirements(status: PasswordValidationStatus): { label:
   ];
   return checks.filter((check): check is { label: string; met: boolean } => check.met !== undefined);
 }
+
+// Suggestions must never be presented as requirements not configured in Firebase.
+export function passwordRecommendations(status: PasswordValidationStatus, password: string): { label: string; met: boolean }[] {
+  const checks: { label: string; met: boolean; required: boolean }[] = [
+    { label: 'Una letra mayúscula', met: /[A-Z]/.test(password), required: status.containsUppercaseLetter !== undefined },
+    { label: 'Un número', met: /[0-9]/.test(password), required: status.containsNumericCharacter !== undefined },
+    { label: 'Un carácter especial', met: Array.from(password).some(value => status.passwordPolicy.allowedNonAlphanumericCharacters?.includes(value)), required: status.containsNonAlphanumericCharacter !== undefined },
+  ];
+  return checks.filter(check => !check.required).map(({ label, met }) => ({ label, met }));
+}

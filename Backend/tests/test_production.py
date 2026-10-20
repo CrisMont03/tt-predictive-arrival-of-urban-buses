@@ -44,3 +44,40 @@ def test_model_source_cache_snapshot_and_no_simulated_feedback(monkeypatch):
     assert len(store.queries) == 2
     feedback = client.post("/feedback", headers=headers, json={"query_id": "query-0001", "actual_min": 11}).json()
     assert not feedback["simulation"]
+
+
+def test_feedback_preserves_provider_snapshot_without_fetching_report_time_context(monkeypatch):
+    from copy import deepcopy
+
+    class TestPredictor:
+        metadata = {"model_version": "unit-test-only"}
+
+        def predict(self, context, observations):
+            assert context["traffic_density"] == 0.5
+            assert context["env_alert_active"] == 1
+            assert "_sources" not in context
+            return 10, (5, 15)
+
+    snapshot = {"traffic_density": 0.5, "env_alert_active": 1,
+                "_sources": {"traffic": {"status": "available", "checked_at": "2026-10-17T19:00:00Z"},
+                             "environmental": {"status": "available", "source_url": "https://www.gob.mx/comisionambiental/prensa/test"}}}
+    fetch = AsyncMock(side_effect=lambda: deepcopy(snapshot))
+    monkeypatch.setattr("app.main.fetch_context", fetch)
+    monkeypatch.setattr(auth, "verify_id_token", lambda token, **kwargs: {"uid": "alice"})
+    store = TestFirestoreAdapter()
+    api = TestClient(create_app("production", store, TestPredictor()))
+    headers = {"Authorization": "Bearer valid-test-token"}
+    query = api.post("/predict", headers=headers, json={"request_id": "source-snapshot-01"}).json()
+    assert query["context_sources"] == snapshot["_sources"]
+    assert store.get_query("alice", query["query_id"])["context_sources"] == snapshot["_sources"]
+    # Conditions can change before submission. Feedback must not re-fetch them.
+    snapshot["traffic_density"] = 0.9
+    snapshot["env_alert_active"] = 0
+    for _ in range(2):
+        response = api.post("/feedback", headers=headers, json={"query_id": query["query_id"], "actual_min": 15})
+        assert response.status_code == 200
+    report = store.reports[("alice", query["query_id"])]
+    assert report["context"]["traffic_density"] == 0.5
+    assert report["context"]["env_alert_active"] == 1
+    assert report["context_sources"] == query["context_sources"]
+    assert fetch.await_count == 1

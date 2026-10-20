@@ -69,7 +69,9 @@ Las reglas rechazan valores inválidos; no los transforman.
   operaciones: una puede completarse aunque la otra quede pendiente.
 - Para cuentas anteriores, se completa el nombre faltante desde Auth si
   está disponible, sin cambiar la fecha ni las preferencias ni sobrescribir un
-  nombre existente. Si falta también en Auth, habrá que solicitarlo posteriormente.
+  nombre válido existente. Si falta también en Auth, Configuración permite ingresarlo
+  con el campo de nombre y el botón Guardar nombre. Los nombres anteriores vacíos
+  o inválidos pueden repararse mediante ese mismo flujo.
 - La transición debe admitir perfiles antiguos sin nombre; no se debe bloquear
   su cambio de preferencias por no haber completado la migración.
 - Las reglas locales permiten crear y actualizar perfiles sin nombre durante esa

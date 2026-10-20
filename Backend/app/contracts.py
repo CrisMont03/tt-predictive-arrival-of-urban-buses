@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,6 +34,7 @@ class PredictResponse(BaseModel):
     source: Literal["mock", "cache", "model"]
     simulation: bool
     context: Context
+    context_sources: dict[str, dict[str, Any]] | None = None
 
 
 class FeedbackRequest(BaseModel):

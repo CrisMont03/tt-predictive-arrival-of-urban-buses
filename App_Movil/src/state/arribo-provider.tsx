@@ -20,7 +20,7 @@ type AppState = {
   history: HistoryEntry[]; alerts: Alert[]; preferences: Preferences; scenario: DemoScenario;
   selectedStation: Station; selectStation: (id: string) => void;
   error: string | null; accountNotice: string | null; dataReady: boolean; hasMore: boolean; pendingCount: number;
-  profilePending: boolean; profileSyncing: boolean; retryProfile: () => Promise<void>;
+  profilePending: boolean; profileSyncing: boolean; retryProfile: (name?: string) => Promise<void>;
   historyLoading: boolean; alertsLoading: boolean; alertsError: string | null; retryAlerts: () => void;
   login: (email: string, password: string) => Promise<void>;
   registerAccount: (name: string, email: string, password: string) => Promise<void>;
@@ -199,20 +199,26 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
     }).catch(failure => { if (activeUid.current === uid) setError(friendlyError(failure)); });
   }, [session, loadedUid, online, refreshHistory, applyPreferredStation]);
 
-  const retryProfile = useCallback(async () => {
+  const retryProfile = useCallback(async (providedName?: string) => {
     if (!session || session.demo) return;
     if (!online) throw new Error('Necesitas conexión para sincronizar tu perfil.');
+    if (providedName !== undefined && displayNameError(providedName)) throw new Error('Agrega un nombre válido');
     const uid = session.uid;
     if (activeUid.current !== uid || syncingProfile.current === uid) return;
     syncingProfile.current = uid;
     setProfileStatus({ uid, status: 'syncing' });
     try {
+      if (providedName !== undefined) {
+        const name = providedName.trim();
+        pendingNames.current.set(uid, name);
+        await AsyncStorage.setItem(pendingNameKey(uid), name).catch(() => {});
+      }
       const saved = pendingNames.current.get(uid) ?? await AsyncStorage.getItem(pendingNameKey(uid));
       if (activeUid.current !== uid) return;
       const candidate = normalizedProfileName(saved) ?? normalizedProfileName(session.displayName);
       const name = await ensureProfile(uid, session.email, candidate);
       if (activeUid.current !== uid) return;
-      if (!name) throw new Error('Tu cuenta está activa, pero no hay un nombre válido para completar el perfil. No necesitas volver a registrarte.');
+      if (!name) throw new Error('Agrega un nombre válido');
       setProfileName({ uid, name });
       const { auth } = firebaseServices();
       if (auth.currentUser?.uid !== uid) return;
@@ -225,14 +231,17 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
     } catch (failure) {
       if (activeUid.current === uid) {
         setProfileStatus({ uid, status: 'pending' });
-        setAccountNotice(`Tu cuenta de acceso sigue activa. No se pudo completar la sincronización del nombre: ${friendlyError(failure)} Puedes reintentar desde Configuración, sin crear otra cuenta.`);
+        const message = failure instanceof Error && failure.message === 'Agrega un nombre válido'
+          ? 'Agrega un nombre válido' : 'No se pudo sincronizar el perfil. Reintenta.';
+        setAccountNotice(message);
+        throw new Error(failure instanceof Error && failure.message === 'Agrega un nombre válido' ? message : friendlyError(failure));
       }
     } finally { if (syncingProfile.current === uid) syncingProfile.current = null; }
   }, [session, online]);
 
   useEffect(() => {
     if (!session || session.demo || loadedUid !== session.uid || !online) return;
-    void retryProfile();
+    void retryProfile().catch(() => {});
   }, [session, loadedUid, online, retryProfile]);
 
   useEffect(() => {

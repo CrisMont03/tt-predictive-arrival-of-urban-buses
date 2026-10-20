@@ -5,6 +5,11 @@ iniciar sesión en Firebase CLI, descargar credenciales ni conectar la app al em
 
 ## Archivos
 
+Para C.3–C.5 (historial, feedback, alertas, estados y reintentos), sigue la
+[guía de pruebas con consultas precargadas](pruebas-integracion-c345.md).
+Incluye las pruebas locales `npm run test:integration` y los pasos manuales en
+Firebase de desarrollo, sin sustituir el modelo ni abrir permisos.
+
 - `esquema-firestore.md`: contrato de las cinco colecciones, estado actual y cambios pendientes.
 - `firestore.rules`: reglas locales con soporte para `display_name` y perfiles antiguos.
 - `firestore.indexes.json`: índices y TTL existentes, sin publicar automáticamente.

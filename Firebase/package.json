@@ -10,6 +10,7 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "test:rules": "firebase emulators:exec --only firestore --project demo-arribo \"npm test\"",
+    "test:integration": "firebase emulators:exec --only firestore --project demo-arribo \"../Backend/.venv/bin/python -m pytest -c ../Backend/pytest.ini ../Backend/tests/test_firestore_integration.py -q\"",
     "emulators:firestore": "firebase emulators:start --only firestore --project demo-arribo"
   },
   "devDependencies": {

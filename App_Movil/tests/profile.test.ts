@@ -36,6 +36,14 @@ test('Un nombre existente no se reemplaza aunque Auth o un reintento tengan otro
   assert.deepEqual(planProfileWrite({ display_name: 'Nombre actual' }, 'ana@example.com', 'Nombre anterior', preferences, 'unused'), { kind: 'none' });
 });
 
+test('El nombre introducido permite completar perfiles con un nombre anterior vacío o inválido', () => {
+  for (const invalid of ['', '   ', null, 123, 'Ana\nMaría']) {
+    assert.deepEqual(planProfileWrite({ display_name: invalid }, 'ana@example.com', ' Ana María ', preferences, 'unused'), {
+      kind: 'update', data: { display_name: 'Ana María' },
+    });
+  }
+});
+
 test('Reintentos de registro y migración son idempotentes', () => {
   const first = planProfileWrite(undefined, 'ana@example.com', 'Ana', preferences, 'server-time');
   assert.equal(first.kind, 'create');
