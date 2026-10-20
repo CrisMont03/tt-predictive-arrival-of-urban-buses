@@ -18,9 +18,9 @@ USO
 
 NOTAS
 ─────
-- Se toman CSVs del patrón: Dataset/Dataset/YYYY-MM-DD/{hora}/*_v4_dataset.csv
+- Se toman CSVs *_v4_dataset.csv de Codigo/Procesamiento_de_videos/output/dataset
   generados por procesar_video_v4.py (una carpeta por franja horaria).
-- El archivo de base de datos se guarda en Dataset/Coding/dataset_maestro.db
+- La base y el CSV consolidado se guardan en Codigo/Dataset/output
 - Las tablas en SQLite son:
     · eventos_espera       → datos base generados por el pipeline de visión (inmutables)
     · eventos_enriquecidos → variables contextuales añadidas después (clima + festivos)
@@ -62,11 +62,10 @@ except ImportError:
 
 
 # ─── Rutas ───────────────────────────────────────────────────────────────────
-RAIZ          = (Path(__file__).resolve().parent.parent if Path(__file__).parent.name == "Coding"
-                 else Path(__file__).resolve().parents[3] / "Dataset")
-RESULTADOS    = RAIZ / "Dataset"                      # Dataset/Dataset/
-DB_PATH       = RAIZ / "Dataset-final" / "dataset_maestro.db"
-CSV_FINAL     = RAIZ / "Dataset-final" / "dataset_final.csv"
+RAIZ          = Path(__file__).resolve().parent
+RESULTADOS    = RAIZ.parent / "Procesamiento_de_videos" / "output" / "dataset"
+DB_PATH       = RAIZ / "output" / "dataset_maestro.db"
+CSV_FINAL     = RAIZ / "output" / "dataset_final.csv"
 STATION_ID    = "rio_consulado"
 CAMERA_ID     = "rio_consulado_cctv_1"
 

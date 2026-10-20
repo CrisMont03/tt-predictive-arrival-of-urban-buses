@@ -15,6 +15,7 @@ from .contracts import Context, FeedbackRequest, PredictRequest, PredictResponse
 from .store import FeedbackConflict, FeedbackTemporarilyUnavailable, FirestoreStore, MemoryStore
 from .context import cached_sources_valid, fetch_context
 from .predictor import Predictor
+from .model_inputs import contract, online_inputs, select_observations
 
 
 def create_app(mode=None, store=None, predictor=None):
@@ -89,15 +90,26 @@ def create_app(mode=None, store=None, predictor=None):
         else:
             external = await fetch_context()
             context_sources = external.pop("_sources", None)
-            observations = sorted((report for report in store.recent_observations(body.station_id, now - timedelta(hours=2)) if report["received_at"] < now and now - timedelta(hours=2) <= report["query_at"] < now), key=lambda report: report["query_at"])[-20:]
+            observations = select_observations(
+                store.recent_observations(body.station_id, now - timedelta(hours=2)),
+                now, body.station_id, predictor.metadata.get("window", 10))
         context = Context(hour=local.hour, day_of_week=local.weekday(), is_weekend=int(local.weekday() >= 5), is_holiday=int(local.date() in holidays.Mexico(years=local.year)), **external)
-        revision = hashlib.sha256(json.dumps({"context": context.model_dump(), "history": [(item["query_id"], item["actual_min"]) for item in observations]}, sort_keys=True).encode()).hexdigest()
+        window = 10 if mode == "demo" else predictor.metadata.get("window", 10)
+        prepared = online_inputs(context.model_dump(), window, now=now, station_id=body.station_id,
+                                 observations=observations,
+                                 fallback=None if mode == "demo" else predictor.metadata.get("fallback"))
+        revision = hashlib.sha256(json.dumps({
+            "context": context.model_dump(), "contract": contract(window),
+            "inputs": {key: value for key, value in prepared.items() if key != "provenance"},
+            "history": [(item.get("uid"), item["query_id"], item["actual_min"], item["received_at"].isoformat()) for item in observations]
+        }, sort_keys=True, allow_nan=False).encode()).hexdigest()
         key = hashlib.sha256(f"{body.station_id}|{local.date()}|{local.hour}|{version}|{revision}".encode()).hexdigest()
         cached = store.get_cache(key)
         if cached and cached["expires_at"] > now and cached_sources_valid(cached.get("context_sources"), datetime.now(timezone.utc)):
             value = {**cached, "source": "cache", "query_id": body.request_id}
         else:
-            wait, interval = (12.3, (8, 17)) if mode == "demo" else predictor.predict(context.model_dump(), observations)
+            wait, interval = (12.3, (8, 17)) if mode == "demo" else predictor.predict(
+                context.model_dump(), observations, now=now, station_id=body.station_id)
             value = PredictResponse(query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=now, requested_at=now, expires_at=now + timedelta(minutes=5), source="mock" if mode == "demo" else "model", simulation=mode == "demo", context=context, context_sources=context_sources).model_dump()
             store.set_cache(key, value)
         return store.create_query(uid, body.request_id, {**value, "requested_at": now})
