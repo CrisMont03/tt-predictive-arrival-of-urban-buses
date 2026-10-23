@@ -2,3 +2,11 @@
 __pycache__
 tests
 .env*
+*.json
+*.pem
+*.key
+*.p8
+*.p12
+*.mp4
+*.keras
+output

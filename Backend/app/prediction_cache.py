@@ -13,7 +13,7 @@ def cache_key(station_id, context, prepared, observations, metadata, simulation)
         "station_id": station_id, "simulation": simulation,
         "contract": contract(metadata.get("window", 10)),
         "artifact": {key: metadata.get(key) for key in
-                     ("model_version", "model_sha256", "scaler", "fallback", "radius", "context_profile")},
+                     ("model_version", "model_sha256", "release_id", "manifest_sha256", "scaler", "fallback", "radius", "context_profile")},
         "context": context,
         "inputs": {key: value for key, value in prepared.items() if key != "provenance"},
         "history": [(item.get("uid"), item["query_id"], item["actual_min"],

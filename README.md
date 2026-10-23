@@ -13,11 +13,28 @@ Implementación local del plan, con separación explícita entre demostración y
 | `Firebase` | Reglas de aislamiento, índices y política TTL preparada; no desplegados. |
 | `docs` | Plan completo y estado verificable. |
 
+## Sección E — Expo Go, modelo y mecanismos A/B sin push
+
+La preparación operativa se documenta en [Infra/README.md](Infra/README.md).
+Incluye `/ready`, descarga de paquetes fijados por generación/hash, imágenes de API
+y entrenamiento, infraestructura en modo inspección y ciclo mensual con snapshots,
+benchmark independiente, pesos cámara/feedback, aprobación y rollback separados.
+`Modelo/retrain_job.py` ejecuta por defecto pruebas sintéticas locales; nunca publica
+sus resultados. Cloud Scheduler y promoción automática no están activados.
+
+FCM, APNs, Apple Developer y builds nativos quedan fuera del alcance actual.
+Se conservan Auth/Firestore del SDK JS y alertas dentro de Expo Go. El Mecanismo A
+actúa por consulta; B es mensual. No existe todavía LSTM aprobado ni despliegue GCP.
+
+No confundir la preparación con producción: faltan Docker activo, validación del
+entorno ML Linux, primeras métricas reales, autorización de recursos y pruebas
+físicas. El promotor rechaza modelos sintéticos y no usa la prueba final de tesis.
+
 No se modificó el detector YOLO ni su calibración. La base SQLite original no se modificó durante las verificaciones.
 
 ## Inicio rápido
 
-App independiente en Expo Go:
+App dentro de Expo Go (entorno de desarrollo, no build independiente):
 
 ```sh
 cd App_Movil
@@ -92,7 +109,7 @@ El artefacto queda `approved=false`. Tras revisar métricas, franjas, cobertura/
 
 Se necesita elegir/configurar proyecto Firebase, habilitar Email/Password, Firestore, credenciales ADC del backend e IAM de mínimo privilegio. Ejecutar pruebas de reglas con Emulator Suite antes de publicar. La app no tiene permisos de escritura sobre caché, historial, feedback validado ni alertas; esas escrituras son del servidor.
 
-Después de configurar cuentas y revisar seguridad: publicar reglas/índices/TTL, preparar Cloud Run/Storage/Secret Manager y EAS. El Dockerfile permite `--build-arg WITH_MODEL=true` para instalar TensorFlow; montar/descargar el artefacto inmutable fuera de la imagen y establecer `ARRIBO_MODEL_DIR`. No se construyó ni desplegó la imagen. Nunca cargar claves administrativas en variables `EXPO_PUBLIC_*`.
+Después de revisar cuentas y seguridad: verificar reglas/índices/TTL y activar la infraestructura Cloud Run/Storage/Secret Manager preparada en E. EAS y builds nativos quedan fuera del alcance. El Dockerfile permite `--build-arg WITH_MODEL=true` para instalar TensorFlow; el paquete inmutable se carga desde directorio local o GCS por generación/hash. No se construyó ni desplegó la imagen. Nunca cargar claves administrativas en variables `EXPO_PUBLIC_*`.
 
 `Backend/admin_alertas.py` publica/retira avisos con ADC/IAM. Es una acción administrativa manual; no se ejecutó durante esta entrega. La lectura climática y TomTom tiene timeout y conserva ausencias como `null`. **No hay monitor automático de contingencia ambiental:** `env_alert_active=null` hasta seleccionar una fuente oficial fiable y verificar su vigencia. Tampoco se habilitaron push, Scheduler, reentrenamiento mensual/promoción automática o medición de latencia de producción. Estas etapas necesitan infraestructura, datos y evaluación; la configuración preparada no equivale a despliegue.
 

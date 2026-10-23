@@ -31,7 +31,7 @@ def load_preparation(directory):
     if any(not any(row["loss_weight"] for row in rows) for rows in partitions.values()):
         raise ValueError("Cada partición necesita esperas observadas")
     frozen = FallbackAccumulator()
-    for row in sorted((r for r in partitions["train"] if r["loss_weight"]), key=lambda r: (r["bus_arrival"], r["sample_id"])):
+    for row in sorted((r for r in partitions["train"] if r["loss_weight"]), key=lambda r: (r.get("available_at", r.get("bus_arrival")), r["sample_id"])):
         frozen.add(row["station_id"], row["event_at"], row["target"])
     if frozen.table != quality["fallback"]:
         raise ValueError("Los respaldos no corresponden exclusivamente a entrenamiento")
@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="Carpeta nueva")
     parser.add_argument("--version", required=True)
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--synthetic", action="store_true", help="Prueba ML aislada; el candidato nunca es elegible")
     args = parser.parse_args()
     try:
         quality, partitions = load_preparation(args.data)
@@ -85,16 +86,18 @@ def main():
     train_inputs = {key: np.concatenate([part[key] for part in train_parts]) for key in train_parts[0]}
     targets = np.array([row["target"] for row in supervised["train"]], dtype="float32").reshape(-1, 1)
     train_targets = np.concatenate([targets] * len(train_parts))
+    # A feedback and camera example retain their total weight across all three scenarios.
+    sample_weights = np.tile(np.array([row["loss_weight"] / len(train_parts) for row in supervised["train"]], dtype="float32"), len(train_parts))
     validation = tensors(supervised["validation"], "operational_inputs")
     validation_targets = np.array([row["target"] for row in supervised["validation"]], dtype="float32").reshape(-1, 1)
     model = build_lstm(quality["window"])
-    model.fit(train_inputs, train_targets, validation_data=(validation, validation_targets),
+    model.fit(train_inputs, train_targets, sample_weight=sample_weights, validation_data=(validation, validation_targets),
               epochs=args.epochs, batch_size=32, shuffle=False,
               callbacks=[tf.keras.callbacks.EarlyStopping(patience=6, restore_best_weights=True)], verbose=2)
     xgb = XGBRegressor(n_estimators=200, max_depth=4, learning_rate=.05,
                        objective="reg:squarederror", random_state=2026050)
     # Both learners see the entire window and its padding mask.
-    xgb.fit(baseline_inputs(train_inputs), train_targets.reshape(-1))
+    xgb.fit(baseline_inputs(train_inputs), train_targets.reshape(-1), sample_weight=sample_weights)
 
     def predict(kind, rows, branch):
         if kind == "historical":
@@ -137,7 +140,8 @@ def main():
     # Validation is used for selection; test remains an independent report.
     operational_mae = report["lstm"]["validation"]["operational"]["mae"]
     cold_mae = report["lstm"]["validation"]["without_feedback"]["mae"]
-    eligible = bool(quality["meets_collection_goal"] and operational_mae < 5 and cold_mae < 5)
+    synthetic = bool(args.synthetic or quality.get("simulation"))
+    eligible = bool(not synthetic and quality["meets_collection_goal"] and operational_mae < 5 and cold_mae < 5)
     args.output.mkdir(parents=True)
     model.save(args.output / "model.keras")
     xgb.save_model(args.output / "xgboost.json")
@@ -148,7 +152,11 @@ def main():
         "model_sha256": hashlib.sha256((args.output / "model.keras").read_bytes()).hexdigest(),
         "dataset_sha256": hashlib.sha256((args.data / "sequences.jsonl").read_bytes()).hexdigest(),
         "quality_sha256": hashlib.sha256((args.data / "quality.json").read_bytes()).hexdigest(),
-        "training_cutoff": max(row["bus_arrival"] for row in supervised["train"]),
+        "training_cutoff": max(row.get("available_at", row.get("bus_arrival")) for row in supervised["train"]),
+        "simulation": synthetic,
+        "calibration_cutoff": max(row.get("available_at", row.get("bus_arrival")) for row in supervised["validation"]),
+        "training_sample_ids": [row["sample_id"] for row in supervised["train"]],
+        "calibration_sample_ids": [row["sample_id"] for row in supervised["validation"]],
         "eligible": eligible, "approved": False, "metrics": report,
         "serving_bus_context": "always_missing; no live camera",
         "note": "Requires independent review including held-out test and feedback usefulness. No automatic deployment.",

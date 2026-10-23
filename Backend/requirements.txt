@@ -1,6 +1,7 @@
-fastapi>=0.115,<1
-uvicorn[standard]>=0.30,<1
-httpx>=0.28,<1
-firebase-admin>=6.6,<8
-holidays>=0.60,<1
-pytest>=8,<10
+-c requirements-constraints.txt
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+firebase-admin==7.7.0
+google-cloud-storage==3.16.0
+holidays==0.106

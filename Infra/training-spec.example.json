@@ -1,0 +1,8 @@
+{
+  "schema_version": "arribo-sequences-v2",
+  "simulation": false,
+  "window": 10,
+  "epochs": 50,
+  "minimum_benchmark": 30,
+  "history": {"uri": "gs://arribo-68326-datasets/history/dataset-final-VERSION.csv", "generation": "REPLACE", "sha256": "REPLACE"}
+}

@@ -1,0 +1,15 @@
+{
+  "project": "arribo-68326",
+  "region": "us-central1",
+  "service": "arribo-api",
+  "repository": "arribo",
+  "api_image": "REPLACE_WITH_REGISTRY_IMAGE_AT_SHA256_DIGEST",
+  "job_image": "REPLACE_WITH_JOB_IMAGE_AT_SHA256_DIGEST",
+  "code_revision": "REPLACE_WITH_COMMIT_SHA",
+  "secret_version": "1",
+  "training_spec": {"uri": "gs://arribo-68326-datasets/specs/monthly-v1.json", "generation": "REPLACE", "sha256": "REPLACE"},
+  "model": null,
+  "auto_promotion": false,
+  "max_instances": 2,
+  "job_timeout": "7200s"
+}

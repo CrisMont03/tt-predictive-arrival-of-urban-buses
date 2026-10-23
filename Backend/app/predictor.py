@@ -7,10 +7,12 @@ from .model_inputs import INPUT_WIDTH, SCHEMA_VERSION, contract, online_inputs, 
 
 
 class Predictor:
-    def __init__(self, directory):
+    def __init__(self, directory, *, require_approved=True):
         path = Path(directory)
         self.metadata = json.loads((path / "metadata.json").read_text())
-        if self.metadata.get("schema_version") != SCHEMA_VERSION or not self.metadata.get("eligible") or not self.metadata.get("approved"):
+        if (self.metadata.get("schema_version") != SCHEMA_VERSION
+                or (require_approved and (self.metadata.get("simulation") or self.metadata.get("eligible") is not True
+                                         or self.metadata.get("approved") is not True))):
             raise ValueError("El artefacto no está validado/aprobado para producción")
         window = self.metadata["window"]
         if self.metadata.get("contract") != contract(window):

@@ -15,6 +15,7 @@ from .context import fetch_context
 from .predictor import Predictor
 from .model_inputs import online_inputs, select_observations
 from .prediction_cache import cache_key, cache_expiration, reusable_prediction
+from .artifacts import configured_model_directory
 
 
 def create_app(mode=None, store=None, predictor=None, *, allow_integration=False,
@@ -32,8 +33,13 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
             store = FirestoreStore()
     if mode == "production" and isinstance(store, MemoryStore):
         raise ValueError("Producción requiere Firestore")
-    if mode == "production" and predictor is None and os.getenv("ARRIBO_MODEL_DIR"):
-        predictor = Predictor(os.environ["ARRIBO_MODEL_DIR"])
+    if mode == "production" and predictor is None:
+        directory, manifest = configured_model_directory()
+        if directory:
+            predictor = Predictor(directory)
+            if manifest:
+                predictor.metadata["release_id"] = manifest["release_id"]
+                predictor.metadata["manifest_sha256"] = os.environ["ARRIBO_MODEL_MANIFEST_SHA256"]
     if getattr(predictor, "kind", None) == "integration" and not allow_integration:
         raise ValueError("El predictor de integración requiere activación explícita de desarrollo")
     if getattr(predictor, "kind", None) == "integration" and os.getenv("K_SERVICE"):
@@ -81,6 +87,13 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
         return {"status": "ok", "mode": mode, "model_ready": predictor is not None and not simulation,
                 "predictor_ready": mode == "demo" or predictor is not None,
                 "predictor_kind": predictor_kind, "simulation": simulation}
+
+    @app.get("/ready")
+    def ready():
+        if predictor is None or simulation:
+            return JSONResponse({"ready": False, "code": "MODEL_NOT_READY"}, status_code=503)
+        return {"ready": True, "model_version": predictor.metadata["model_version"],
+                "release_id": predictor.metadata.get("release_id"), "simulation": False}
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(body: PredictRequest, uid=Depends(user)):
