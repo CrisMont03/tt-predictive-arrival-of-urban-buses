@@ -21,6 +21,27 @@ Abre la app con Expo Go compatible con SDK 57 y toca **Explorar demostración**.
 
 GPS solicita permiso solo al activarlo; negarlo no bloquea las consultas. Historial y preferencias se aíslan por uid. Los reportes reales sin red se guardan en una cola y se reintentan al reconectar. No uses un backend `demo` con la app `live`: sus esquemas de autenticación son intencionalmente distintos.
 
+### Recorrido de integración de la sección D
+
+La app siempre consulta `/predict`; el servidor decide si reutiliza caché o ejecuta
+el predictor y registra una consulta personal en ambos casos. La app no lee
+`predictions` ni escribe historial o feedback directamente en Firestore.
+
+El backend de desarrollo puede activar expresamente un predictor de integración
+con Firebase Auth real: no es el backend `demo`, no es un LSTM y toda respuesta
+queda marcada como simulada, incluso en cache hits. Guía:
+[pruebas-integracion-d.md](../Firebase/pruebas-integracion-d.md).
+
+Los reintentos conservan `request_id`, los dobles envíos comparten la consulta
+activa y las respuestas de sesiones/estaciones anteriores se descartan. Se validan
+respuesta, contexto e identidad antes de añadir historial. Un acuse de feedback
+inválido o fallo transitorio conserva el reporte pendiente; restaurar sin conexión
+mantiene su valor y no permite reemplazarlo por otro mientras está pendiente.
+
+Pruebas específicas: `node --experimental-strip-types --test tests/query-flow.test.ts`.
+La suite completa conserva dos discrepancias previas en `auth.test.ts` sobre la
+política de contraseñas; no se modificaron sus requisitos como parte de D.
+
 ## Verificar
 
 ```sh

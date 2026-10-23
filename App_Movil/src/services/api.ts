@@ -1,6 +1,7 @@
 import { API_URL } from '@/config/arribo';
 import { firebaseServices } from '@/services/firebase';
 import type { Prediction } from '@/types/arribo';
+import { assertFeedbackAcknowledgement, parsePrediction } from './prediction-contract';
 
 export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message); }
@@ -20,8 +21,12 @@ export async function apiRequest<T>(path: string, body?: unknown): Promise<T> {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: controller.signal,
     });
-    const result = await response.json();
-    if (!response.ok) throw new ApiError(result.code ?? 'SERVICE_ERROR', result.message ?? 'No se pudo completar la solicitud.', response.status);
+    const result = await response.json().catch(() => { throw new ApiError('INVALID_RESPONSE', 'El servicio devolvió una respuesta inválida. Reintenta.', response.status); });
+    if (!response.ok) {
+      const failure = result && typeof result === 'object' ? result : {};
+      throw new ApiError(typeof failure.code === 'string' ? failure.code : 'SERVICE_ERROR',
+        typeof failure.message === 'string' ? failure.message : 'No se pudo completar la solicitud.', response.status);
+    }
     return result as T;
   } catch (error) {
     if (error instanceof ApiError) throw error;
@@ -29,14 +34,15 @@ export async function apiRequest<T>(path: string, body?: unknown): Promise<T> {
   } finally { clearTimeout(timer); }
 }
 
-export function validatePrediction(result: Prediction): Prediction {
-  if (!result.query_id || typeof result.station_id !== 'string' || !result.station_id || !Number.isFinite(result.waiting_time_min) || result.waiting_time_min < 0 ||
-      !Array.isArray(result.confidence_interval) || result.confidence_interval.length !== 2 ||
-      result.confidence_interval.some(n => !Number.isFinite(n) || n < 0) ||
-      result.confidence_interval[0] > result.confidence_interval[1] ||
-      !Number.isFinite(Date.parse(result.timestamp)) || !Number.isFinite(Date.parse(result.expires_at)) ||
-      !result.context || !['mock', 'cache', 'model'].includes(result.source) || typeof result.simulation !== 'boolean') {
+export function validatePrediction(result: unknown, expected?: { queryId: string; stationId: string }): Prediction {
+  try { return parsePrediction(result, expected); } catch {
     throw new ApiError('INVALID_RESPONSE', 'El servicio devolvió una respuesta incompleta.', 502);
   }
-  return result;
+}
+
+export async function sendFeedback(queryId: string, actualMin: number) {
+  const result = await apiRequest('/feedback', { query_id: queryId, actual_min: actualMin });
+  try { assertFeedbackAcknowledgement(result, queryId); } catch {
+    throw new ApiError('INVALID_RESPONSE', 'No se pudo confirmar el reporte. Reintenta.', 502);
+  }
 }

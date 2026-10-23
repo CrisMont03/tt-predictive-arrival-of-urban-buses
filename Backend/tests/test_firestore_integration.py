@@ -59,6 +59,55 @@ def query_id(run_id, case="online"):
     return f"arribo-c345-{run_id}-{case}"
 
 
+def test_section_d_cache_history_feedback_on_real_firestore_adapter(environment, monkeypatch):
+    from app.integration_predictor import IntegrationPredictor, integration_context
+    db, documents, store, original_api, run_id = environment
+    clock = [datetime.now(timezone.utc)]
+    predictor = IntegrationPredictor()
+    ids = [f"arribo-d-{run_id}-{i}" for i in range(3)]
+    cache_keys = []
+    set_cache = store.set_cache
+    def tracked_cache(key, value):
+        cache_keys.append(key)
+        set_cache(key, value)
+    monkeypatch.setattr(store, "set_cache", tracked_cache)
+    try:
+        with TestClient(create_app("production", store, predictor, allow_integration=True,
+                                   clock=lambda: clock[0], context_provider=integration_context)) as api:
+            def request(qid):
+                response = api.post("/predict", headers=owner_headers(), json={"request_id": qid})
+                assert response.status_code == 200
+                return response.json()
+            first = request(ids[0])
+            clock[0] += timedelta(seconds=1)
+            second = request(ids[1])
+            assert first["source"] == "mock" and second["source"] == "cache"
+            assert first["simulation"] and second["simulation"]
+            assert predictor.calls == 1
+            assert request(ids[1]) == second
+            snapshot = store.get_query(DEFAULT_UID, ids[1])
+            assert snapshot["requested_at"] > snapshot["timestamp"]
+            assert snapshot["context"] == first["context"]
+            body = {"query_id": ids[1], "actual_min": 15}
+            for _ in range(2):
+                assert api.post("/feedback", headers=owner_headers(), json=body).status_code == 200
+            report = db.document(f"feedback/{DEFAULT_UID}/entries/{ids[1]}").get().to_dict()
+            assert report["simulation"] and report["query_at"] == snapshot["requested_at"]
+            assert store.get_query(DEFAULT_UID, ids[1])["actual_min"] == 15
+            assert api.post("/feedback", headers={"Authorization": "Bearer test-other"}, json=body).status_code == 404
+            assert api.post("/feedback", headers=owner_headers(), json={**body, "actual_min": 16}).status_code == 409
+            assert all(r["query_id"] != ids[1] for r in store.recent_observations("rio_consulado", clock[0] - timedelta(hours=2)))
+            clock[0] += timedelta(minutes=6)
+            assert request(ids[2])["source"] == "mock"
+            assert predictor.calls == 2
+    finally:
+        for qid in ids:
+            store.query_ref(DEFAULT_UID, qid).delete()
+            db.document(f"feedback/{DEFAULT_UID}/entries/{qid}").delete()
+        for key in set(cache_keys):
+            db.document(f"predictions/{key}").delete()
+
+
 def test_adapter_history_order_and_repeat_seed_preserve_data(environment):
     db, documents, store, api, run_id = environment
     rows = list(db.collection("query_history").document(DEFAULT_UID).collection("queries")

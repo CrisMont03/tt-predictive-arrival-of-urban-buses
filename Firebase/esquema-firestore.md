@@ -187,7 +187,8 @@ autorizada, no los usuarios desde la app.
 el backend determine que corresponde al mismo contexto, sin volver a ejecutar el modelo.
 
 `cache_key` es el ID calculado por el backend mediante un hash que considera estación,
-fecha/hora local, versión y revisión del contexto/observaciones. No se crea a mano
+calendario, identidad del artefacto, contrato, preparación y observaciones seleccionadas,
+con separación explícita de simulaciones. No se crea a mano
 ni necesita duplicarse como campo del documento.
 
 | Campo | Tipo en Firestore | Explicación |
@@ -205,7 +206,9 @@ ni necesita duplicarse como campo del documento.
 | `simulation` | boolean | Distingue datos simulados de reales. |
 | `context` | map | Condiciones utilizadas para la consulta. |
 
-La vigencia actual es de cinco minutos. Al reutilizar la caché, el backend registra
+La vigencia máxima es de cinco minutos y puede reducirse por la expiración de las
+fuentes de contexto. La lectura y escritura son solo del backend; un hit evita
+inferencia, no la llamada a FastAPI. Al reutilizar la caché, el backend registra
 en el historial el identificador y la fecha de la consulta nueva; no debe confundirse
 con el `query_id` conservado en la caché.
 

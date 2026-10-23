@@ -11,13 +11,13 @@ export async function demoPrediction(requestId: string, scenario: DemoScenario, 
   await new Promise(resolve => setTimeout(resolve, scenario === 'slow' ? 2500 : 450));
   if (scenario === 'error') throw new Error('El servicio de demostración no está disponible. Puedes reintentar o cambiar el escenario en Configuración.');
   const now = new Date();
-  return { query_id: requestId, station_id: stationId, waiting_time_min: 12.3, confidence_interval: [8, 17], model_version: 'demo-v1', timestamp: now.toISOString(), expires_at: new Date(now.getTime() + 300000).toISOString(), source: 'mock', simulation: true, context: demoContext(now) };
+  return { query_id: requestId, station_id: stationId, waiting_time_min: 12.3, confidence_interval: [8, 17], model_version: 'demo-v1', timestamp: now.toISOString(), requested_at: now.toISOString(), expires_at: new Date(now.getTime() + 300000).toISOString(), source: 'mock', simulation: true, context: demoContext(now) };
 }
 
 export function demoHistory(): HistoryEntry[] {
   return [8.4, 15.2, 11.7].map((minutes, index) => {
     const date = new Date(Date.now() - (index + 1) * 3600000);
-    return { query_id: `example-${index}`, station_id: STATION.id, waiting_time_min: minutes, confidence_interval: [Math.max(0, minutes - 4), minutes + 4], model_version: 'demo-v1', timestamp: date.toISOString(), expires_at: date.toISOString(), source: 'mock', simulation: true, context: demoContext(date), ...(index === 1 ? { actual_min: 16 } : {}) };
+    return { query_id: `example-${index}`, station_id: STATION.id, waiting_time_min: minutes, confidence_interval: [Math.max(0, minutes - 4), minutes + 4], model_version: 'demo-v1', timestamp: date.toISOString(), requested_at: date.toISOString(), expires_at: new Date(date.getTime() + 300000).toISOString(), source: 'mock', simulation: true, context: demoContext(date), ...(index === 1 ? { actual_min: 16 } : {}) };
   });
 }
 

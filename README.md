@@ -37,6 +37,23 @@ OpenAPI: `http://localhost:8080/docs`. `/predict` y `/feedback` en demo aceptan 
 
 `timestamp` indica cuándo se generó la estimación; `requested_at`, cuándo se hizo la consulta. Un hit de caché conserva el primero y registra un segundo nuevo. El feedback utiliza la fecha de consulta del servidor, no la hora de creación del caché ni un timestamp suministrado por el cliente.
 
+## Sección D: recorrido completo sin LSTM
+
+La caché es exclusivamente del servidor: la app siempre llama a `/predict`.
+Un hit evita otra inferencia, pero no la autenticación, preparación y registro de
+la consulta. No se abrieron reglas de Firestore para acceso móvil a `predictions`
+ni para escrituras móviles en historial o feedback.
+
+El runner conserva `MODEL_NOT_READY` por defecto. Para pruebas manuales, permite
+`--predictor integration --context fixture` solo con confirmación de `arribo-68326`;
+ese predictor no es un LSTM y sus resultados, caché y feedback conservan
+`simulation=true`. `/health` distingue `predictor_kind`, `predictor_ready` y
+`model_ready`; un predictor de integración no indica modelo real disponible.
+
+Guía de arranque, contrato y prueba manual:
+[Firebase/pruebas-integracion-d.md](Firebase/pruebas-integracion-d.md).
+No se cargaron fixtures en Firebase real ni se ejecutó el modelo en esta entrega.
+
 ## Datos completos y preparación
 
 Desde `Codigo`, para no sobrescribir el CSV anterior durante pruebas:

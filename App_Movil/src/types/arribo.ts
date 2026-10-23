@@ -28,6 +28,7 @@ export type Prediction = {
   source: 'mock' | 'cache' | 'model';
   simulation: boolean;
   context: Context;
+  context_sources?: Record<string, Record<string, unknown>> | null;
 };
 
 export type HistoryEntry = Prediction & { requested_at?: string; actual_min?: number; feedback_pending?: boolean };

@@ -6,14 +6,17 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 
 import { DEFAULT_PREFERENCES, DEMO_MODE, STATION } from '@/config/arribo';
 import { DEFAULT_STATION, initialStation, stationAvailable, stationById } from '@/data/stations';
-import { ApiError, apiRequest, validatePrediction } from '@/services/api';
+import { apiRequest, sendFeedback, validatePrediction } from '@/services/api';
 import { demoAlerts, demoHistory, demoPrediction } from '@/services/demo';
 import { firebaseServices } from '@/services/firebase';
 import { planProfileWrite } from '@/services/profile-plan';
 import { completeRegistration } from '@/services/registration';
+import { normalizePredictionDates, retryableFeedbackError, toISO } from '@/services/prediction-contract';
+import { createQueryFlow } from '@/services/query-flow';
+import { enqueueFeedback, withPendingFeedback } from '@/services/feedback-state';
 import type { Alert, DemoScenario, HistoryEntry, PendingFeedback, Prediction, Preferences, Session, Station } from '@/types/arribo';
 import { displayNameError, normalizedProfileName } from '@/utils/profile-name';
-import { createStationSelection, feedbackPayload, resolveStationPrediction, type StationSnapshot } from '@/utils/station-selection';
+import { createStationSelection } from '@/utils/station-selection';
 
 type AppState = {
   booting: boolean; session: Session | null; online: boolean; mode: 'demo' | 'live';
@@ -35,10 +38,6 @@ function userSession(user: User | null): Session | null {
   return user ? { uid: user.uid, email: user.email, displayName: user.displayName, demo: false } : null;
 }
 
-function toISO(value: unknown): string {
-  if (value && typeof value === 'object' && 'toDate' in value) return (value as { toDate: () => Date }).toDate().toISOString();
-  return String(value);
-}
 function friendlyError(error: unknown) {
   const code = (error as { code?: string })?.code;
   if (code === 'permission-denied') return 'Firestore rechazó el acceso. Comprueba el proyecto y que sus reglas probadas estén publicadas.';
@@ -67,6 +66,7 @@ const pendingNameKey = (uid: string) => `arribo:live:${uid}:pending-profile-name
 export function ArriboProvider({ children }: { children: ReactNode }) {
   const mode = DEMO_MODE ? 'demo' : 'live';
   const [selection] = useState(() => createStationSelection(DEFAULT_STATION));
+  const [queryFlow] = useState(() => createQueryFlow());
   const [selectedStation, setSelectedStation] = useState<Station>(DEFAULT_STATION);
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
@@ -86,8 +86,7 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<PendingFeedback[]>([]);
   const activeUid = useRef<string | null>(null);
   const cursor = useRef<QueryDocumentSnapshot | null>(null);
-  const sending = useRef(false);
-  const requestId = useRef<(StationSnapshot & { id: string }) | null>(null);
+  const sending = useRef<string | null>(null);
   const queueRef = useRef<PendingFeedback[]>([]);
   const authBusy = useRef(false);
   const registering = useRef(false);
@@ -99,17 +98,17 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
   const applyPreferredStation = useCallback((id: string | undefined) => {
     const snapshot = selection.capture();
     const station = selection.applyPreference(initialStation(id, mode));
-    if (!selection.matches(snapshot)) { requestId.current = null; setAlerts([]); }
+    if (!selection.matches(snapshot)) { queryFlow.reset(); setAlerts([]); }
     setSelectedStation(station);
-  }, [selection, mode]);
+  }, [selection, mode, queryFlow]);
   const selectStation = useCallback((id: string) => {
     const station = stationById(id);
     if (!station || !stationAvailable(station, mode)) throw new Error('Esta estación no está habilitada para consultas en este modo.');
     const snapshot = selection.capture();
     const next = selection.select(station);
-    if (!selection.matches(snapshot)) { requestId.current = null; setAlerts([]); setError(null); setAlertsError(null); }
+    if (!selection.matches(snapshot)) { queryFlow.reset(); setAlerts([]); setError(null); setAlertsError(null); }
     setSelectedStation(next);
-  }, [selection, mode]);
+  }, [selection, mode, queryFlow]);
 
   useEffect(() => NetInfo.addEventListener(state => setOnline(state.isConnected !== false && state.isInternetReachable !== false)), []);
   useEffect(() => {
@@ -140,23 +139,23 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
     setSelectedStation(selection.reset());
     // Clear the previous account before hydrating the new account's private data.
     setLoadedUid(null); setHistory([]); setAlerts([]); setPending([]); setPreferences(DEFAULT_PREFERENCES); setHasMore(false); setHistoryLoading(false); setAlertsLoading(false); setAlertsError(null);
-    queueRef.current = []; cursor.current = null; requestId.current = null;
+    queueRef.current = []; cursor.current = null; queryFlow.reset();
     if (!uid) return;
     let alive = true;
     AsyncStorage.getItem(`arribo:${DEMO_MODE ? 'demo' : 'live'}:${uid}`).then(value => {
       if (!alive) return;
       const saved = value ? JSON.parse(value) : null;
-      setHistory(saved?.history ?? (session?.demo ? demoHistory() : []));
       setAlerts(saved?.alerts ?? (session?.demo ? demoAlerts() : []));
       const restoredPreferences = { ...DEFAULT_PREFERENCES, ...saved?.preferences };
       setPreferences(restoredPreferences); applyPreferredStation(restoredPreferences.preferred_station);
       // Legacy reports predate multi-station demo. Recover original station
       // from the query when possible; all earlier real requests were rio_consulado.
       queueRef.current = (saved?.pending ?? []).map((report: PendingFeedback) => ({ ...report, station_id: report.station_id ?? saved?.history?.find((entry: HistoryEntry) => entry.query_id === report.query_id)?.station_id ?? STATION.id }));
+      setHistory(withPendingFeedback(saved?.history ?? (session?.demo ? demoHistory() : []), queueRef.current));
       setPending([...queueRef.current]);
     }).catch(() => { if (alive) setError('No se pudieron cargar los datos guardados.'); }).finally(() => { if (alive) setLoadedUid(uid); });
     return () => { alive = false; };
-  }, [session, selection, applyPreferredStation]);
+  }, [session, selection, applyPreferredStation, queryFlow]);
 
   useEffect(() => {
     if (session && loadedUid === session.uid) AsyncStorage.setItem(`arribo:${DEMO_MODE ? 'demo' : 'live'}:${session.uid}`, JSON.stringify({ history, alerts, preferences, pending })).catch(() => setError('No se pudieron guardar los datos en el dispositivo.'));
@@ -173,15 +172,12 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
       if (activeUid.current !== uid) return;
       const entries = snapshot.docs.map(item => {
         const data = item.data();
-        return validatePrediction({ ...data, query_id: item.id, requested_at: toISO(data.requested_at ?? data.timestamp), timestamp: toISO(data.timestamp), expires_at: toISO(data.expires_at) } as HistoryEntry) as HistoryEntry;
+        return validatePrediction(normalizePredictionDates(data, item.id)) as HistoryEntry;
       });
       cursor.current = snapshot.docs.at(-1) ?? null; setHasMore(entries.length === 20);
       setHistory(previous => {
         const merged = more ? [...new Map([...previous, ...entries].map(item => [item.query_id, item])).values()] : entries;
-        return merged.map(item => {
-          const report = queueRef.current.find(queued => queued.query_id === item.query_id);
-          return report ? { ...item, actual_min: report.actual_min, feedback_pending: true } : item;
-        });
+        return withPendingFeedback(merged, queueRef.current);
       });
     } finally { if (activeUid.current === uid) setHistoryLoading(false); }
   }, [session, online]);
@@ -262,17 +258,17 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
   }, [session, loadedUid, online, selectedStation.id, selection, alertsAttempt]);
 
   const retryPending = useCallback(async () => {
-    if (!session || session.demo || !online || loadedUid !== session.uid || sending.current) return;
-    sending.current = true; const uid = session.uid;
+    if (!session || session.demo || !online || loadedUid !== session.uid || sending.current === session.uid) return;
+    const uid = session.uid; sending.current = uid;
     try {
       for (const report of [...queueRef.current]) {
-        await apiRequest('/feedback', feedbackPayload(report));
+        await sendFeedback(report.query_id, report.actual_min);
         if (activeUid.current !== uid) return;
         queueRef.current = queueRef.current.filter(item => item.query_id !== report.query_id); setPending([...queueRef.current]);
         setHistory(previous => previous.map(item => item.query_id === report.query_id ? { ...item, actual_min: report.actual_min, feedback_pending: false } : item));
       }
     } catch (failure) { if (activeUid.current === uid) setError(friendlyError(failure)); }
-    finally { sending.current = false; }
+    finally { if (sending.current === uid) sending.current = null; }
   }, [session, online, loadedUid]);
   useEffect(() => { void retryPending(); }, [retryPending]);
 
@@ -325,6 +321,7 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
   }
   async function logout() {
     activeUid.current = null;
+    queryFlow.reset();
     if (session) await AsyncStorage.setItem(`arribo:${DEMO_MODE ? 'demo' : 'live'}:${session.uid}`, JSON.stringify({ history, alerts, preferences, pending: queueRef.current }));
     if (session?.demo) await AsyncStorage.removeItem('arribo:demo-session'); else await signOut(firebaseServices().auth);
     setSession(null); setError(null); setAccountNotice(null);
@@ -335,27 +332,32 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
     const uid = session.uid;
     const station = selection.current(); const snapshot = selection.capture();
     if (!stationAvailable(station, session.demo ? 'demo' : 'live')) throw new Error('No hay predicciones reales disponibles para esta estación.');
-    const request = requestId.current ?? { ...snapshot, id: `query-${Date.now()}-${Math.random().toString(36).slice(2, 12)}` }; requestId.current = request;
-    const result = await resolveStationPrediction(station.id, () => activeUid.current === uid && selection.matches(snapshot), async () => session.demo ? demoPrediction(request.id, scenario, station.id) : validatePrediction(await apiRequest<Prediction>('/predict', { station_id: station.id, request_id: request.id })));
-    requestId.current = null; setHistory(previous => [{ ...result, requested_at: result.requested_at ?? new Date().toISOString() }, ...previous.filter(item => item.query_id !== result.query_id)]);
-    return result;
+    return queryFlow.run({ uid, snapshot,
+      isCurrent: () => activeUid.current === uid && selection.matches(snapshot),
+      send: async id => session.demo ? demoPrediction(id, scenario, station.id) : validatePrediction(
+        await apiRequest('/predict', { station_id: station.id, request_id: id }), { queryId: id, stationId: station.id }),
+      onResult: result => setHistory(previous => [{ ...result, requested_at: result.requested_at ?? new Date().toISOString() }, ...previous.filter(item => item.query_id !== result.query_id)]),
+    });
   }
   async function feedback(queryId: string, minutes: number): Promise<'sent' | 'queued'> {
     const original = history.find(item => item.query_id === queryId);
     if (!session || !original) throw new Error('No se encontró la consulta.');
     if (!Number.isFinite(minutes) || minutes < 0 || minutes > 180) throw new Error('Ingresa una espera entre 0 y 180 minutos.');
     const uid = session.uid; const report: PendingFeedback = { query_id: queryId, actual_min: minutes, station_id: original.station_id };
+    // A lost acknowledgement may already have committed on the server.
+    // Never replace an uncertain pending value with a different report.
+    enqueueFeedback(queueRef.current, report);
     if (!session.demo && online) {
       try {
-        await apiRequest('/feedback', feedbackPayload(report));
+        await sendFeedback(report.query_id, report.actual_min);
         if (activeUid.current !== uid) throw new Error('La sesión cambió.');
         setHistory(previous => previous.map(item => item.query_id === queryId ? { ...item, actual_min: minutes, feedback_pending: false } : item)); return 'sent';
-      } catch (failure) { if (!(failure instanceof ApiError) || failure.code !== 'NETWORK') throw failure; }
+      } catch (failure) { if (!retryableFeedbackError(failure)) throw failure; }
     } else if (session.demo) {
       setHistory(previous => previous.map(item => item.query_id === queryId ? { ...item, actual_min: minutes } : item)); return 'sent';
     }
     if (activeUid.current !== uid) throw new Error('La sesión cambió. Vuelve a iniciar sesión para enviar el reporte.');
-    queueRef.current = [...queueRef.current.filter(item => item.query_id !== queryId), report];
+    queueRef.current = enqueueFeedback(queueRef.current, report);
     await AsyncStorage.setItem(`arribo:live:${uid}`, JSON.stringify({ history, alerts, preferences, pending: queueRef.current }));
     setPending([...queueRef.current]); setHistory(previous => previous.map(item => item.query_id === queryId ? { ...item, actual_min: minutes, feedback_pending: true } : item));
     return 'queued';

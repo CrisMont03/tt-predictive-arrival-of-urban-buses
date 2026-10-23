@@ -1,5 +1,3 @@
-import hashlib
-import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -13,12 +11,14 @@ from fastapi.responses import JSONResponse
 
 from .contracts import Context, FeedbackRequest, PredictRequest, PredictResponse
 from .store import FeedbackConflict, FeedbackTemporarilyUnavailable, FirestoreStore, MemoryStore
-from .context import cached_sources_valid, fetch_context
+from .context import fetch_context
 from .predictor import Predictor
-from .model_inputs import contract, online_inputs, select_observations
+from .model_inputs import online_inputs, select_observations
+from .prediction_cache import cache_key, cache_expiration, reusable_prediction
 
 
-def create_app(mode=None, store=None, predictor=None):
+def create_app(mode=None, store=None, predictor=None, *, allow_integration=False,
+               clock=None, context_provider=None):
     mode = mode or os.getenv("ARRIBO_MODE", "production")
     if mode not in {"demo", "production"}:
         raise ValueError("ARRIBO_MODE debe ser demo o production")
@@ -34,6 +34,13 @@ def create_app(mode=None, store=None, predictor=None):
         raise ValueError("Producción requiere Firestore")
     if mode == "production" and predictor is None and os.getenv("ARRIBO_MODEL_DIR"):
         predictor = Predictor(os.environ["ARRIBO_MODEL_DIR"])
+    if getattr(predictor, "kind", None) == "integration" and not allow_integration:
+        raise ValueError("El predictor de integración requiere activación explícita de desarrollo")
+    if getattr(predictor, "kind", None) == "integration" and os.getenv("K_SERVICE"):
+        raise ValueError("El predictor de integración no se permite en Cloud Run")
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    simulation = mode == "demo" or bool(getattr(predictor, "simulation", False))
+    predictor_kind = "integration" if mode == "demo" else getattr(predictor, "kind", "lstm" if predictor else "unavailable")
     app = FastAPI(title="ARRIBO", version="1.0.0", description="Predicción de espera; las simulaciones nunca se usan para aprendizaje.")
     app.state.store = store
     app.state.mode = mode
@@ -71,16 +78,20 @@ def create_app(mode=None, store=None, predictor=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": mode, "model_ready": predictor is not None, "simulation": mode == "demo"}
+        return {"status": "ok", "mode": mode, "model_ready": predictor is not None and not simulation,
+                "predictor_ready": mode == "demo" or predictor is not None,
+                "predictor_kind": predictor_kind, "simulation": simulation}
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(body: PredictRequest, uid=Depends(user)):
         existing = store.get_query(uid, body.request_id)
         if existing:
+            if existing["station_id"] != body.station_id:
+                raise HTTPException(409, {"code": "REQUEST_CONFLICT", "message": "Ese identificador ya pertenece a otra consulta."})
             return existing
         if mode != "demo" and predictor is None:
             raise HTTPException(503, {"code": "MODEL_NOT_READY", "message": "El predictor aún no está disponible. Inténtalo más tarde."})
-        now = datetime.now(timezone.utc)
+        now = clock()
         local = now.astimezone(ZoneInfo("America/Mexico_City"))
         version = "demo-v1" if mode == "demo" else predictor.metadata["model_version"]
         observations = []
@@ -88,7 +99,7 @@ def create_app(mode=None, store=None, predictor=None):
         if mode == "demo":
             external = dict(precipitation_mm=0.0, temp_c=19.0, humidity=65.0, traffic_density=.72, env_alert_active=0)
         else:
-            external = await fetch_context()
+            external = dict(await (context_provider or fetch_context)())
             context_sources = external.pop("_sources", None)
             observations = select_observations(
                 store.recent_observations(body.station_id, now - timedelta(hours=2)),
@@ -98,19 +109,21 @@ def create_app(mode=None, store=None, predictor=None):
         prepared = online_inputs(context.model_dump(), window, now=now, station_id=body.station_id,
                                  observations=observations,
                                  fallback=None if mode == "demo" else predictor.metadata.get("fallback"))
-        revision = hashlib.sha256(json.dumps({
-            "context": context.model_dump(), "contract": contract(window),
-            "inputs": {key: value for key, value in prepared.items() if key != "provenance"},
-            "history": [(item.get("uid"), item["query_id"], item["actual_min"], item["received_at"].isoformat()) for item in observations]
-        }, sort_keys=True, allow_nan=False).encode()).hexdigest()
-        key = hashlib.sha256(f"{body.station_id}|{local.date()}|{local.hour}|{version}|{revision}".encode()).hexdigest()
-        cached = store.get_cache(key)
-        if cached and cached["expires_at"] > now and cached_sources_valid(cached.get("context_sources"), datetime.now(timezone.utc)):
+        metadata = {"model_version": version, "window": window} if mode == "demo" else predictor.metadata
+        key = cache_key(body.station_id, context.model_dump(), prepared, observations, metadata, simulation)
+        cached = reusable_prediction(store.get_cache(key), clock(), body.station_id, version, simulation)
+        if cached:
+            logging.getLogger("arribo").info("prediction.cache_hit station=%s model=%s simulation=%s", body.station_id, version, simulation)
             value = {**cached, "source": "cache", "query_id": body.request_id}
         else:
             wait, interval = (12.3, (8, 17)) if mode == "demo" else predictor.predict(
                 context.model_dump(), observations, now=now, station_id=body.station_id)
-            value = PredictResponse(query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=now, requested_at=now, expires_at=now + timedelta(minutes=5), source="mock" if mode == "demo" else "model", simulation=mode == "demo", context=context, context_sources=context_sources).model_dump()
+            generated_at = clock()
+            expires_at = cache_expiration(generated_at, context_sources)
+            if expires_at <= generated_at:
+                raise HTTPException(503, {"code": "CONTEXT_EXPIRED", "message": "El contexto venció durante la consulta. Inténtalo de nuevo."})
+            value = PredictResponse(query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=generated_at, requested_at=now, expires_at=expires_at, source="mock" if simulation else "model", simulation=simulation, context=context, context_sources=context_sources).model_dump()
+            logging.getLogger("arribo").info("prediction.cache_miss station=%s model=%s simulation=%s", body.station_id, version, simulation)
             store.set_cache(key, value)
         return store.create_query(uid, body.request_id, {**value, "requested_at": now})
 
@@ -119,7 +132,7 @@ def create_app(mode=None, store=None, predictor=None):
         original = store.get_query(uid, body.query_id)
         if not original:
             raise HTTPException(404, {"code": "QUERY_NOT_FOUND", "message": "No se encontró esta consulta en tu cuenta."})
-        report = {"query_id": body.query_id, "uid": uid, "station_id": original["station_id"], "actual_min": body.actual_min, "predicted_min": original["waiting_time_min"], "error_min": body.actual_min - original["waiting_time_min"], "context": original["context"], "query_at": original.get("requested_at", original["timestamp"]), "received_at": datetime.now(timezone.utc), "simulation": original["simulation"], "outside_domain": body.actual_min > 45, "model_version": original["model_version"]}
+        report = {"query_id": body.query_id, "uid": uid, "station_id": original["station_id"], "actual_min": body.actual_min, "predicted_min": original["waiting_time_min"], "error_min": body.actual_min - original["waiting_time_min"], "context": original["context"], "query_at": original.get("requested_at", original["timestamp"]), "received_at": clock(), "simulation": original["simulation"], "outside_domain": body.actual_min > 45, "model_version": original["model_version"]}
         if original.get("context_sources") is not None:
             report["context_sources"] = original["context_sources"]
         try:
