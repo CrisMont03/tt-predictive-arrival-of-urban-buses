@@ -24,6 +24,9 @@
 !.env.sample
 !.env.template
 
+# Local infrastructure configuration
+/Infra/config.local.json
+
 # Administrative credentials and local secret directories
 # Store service-account keys outside the repository whenever possible.
 *service-account*.json
