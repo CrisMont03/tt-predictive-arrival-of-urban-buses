@@ -32,7 +32,7 @@ test('Registro completo crea Auth una vez y completa pasos del perfil en orden',
   assert.deepEqual(calls, ['auth', 'name', 'profile']); assert.deepEqual(result, { user, pending: [] });
 });
 
-test('Política: muestra longitud máxima y todos los requisitos efectivos cuando Firebase los exige', () => {
+test('Política: muestra los requisitos efectivos seleccionados sin convertirlos en recomendaciones', () => {
   const status = { isValid: false, meetsMinPasswordLength: true, meetsMaxPasswordLength: true,
     containsLowercaseLetter: true, containsUppercaseLetter: false, containsNumericCharacter: false,
     containsNonAlphanumericCharacter: false, passwordPolicy: {
@@ -41,7 +41,7 @@ test('Política: muestra longitud máxima y todos los requisitos efectivos cuand
     },
   } as PasswordValidationStatus;
   assert.deepEqual(passwordRequirements(status).map(check => check.label), [
-    'Al menos 8 caracteres', 'Hasta 64 caracteres', 'Una letra minúscula',
+    'Al menos 8 caracteres', 'Una letra minúscula',
     'Una letra mayúscula', 'Un número', 'Un carácter especial',
   ]);
   assert.deepEqual(passwordRecommendations(status, 'abc'), []);
@@ -53,7 +53,7 @@ test('Política de seis caracteres no inventa complejidad obligatoria; la separa
   } } as PasswordValidationStatus;
   assert.deepEqual(passwordRequirements(status), [{ label: 'Al menos 6 caracteres', met: true }]);
   const suggestions = passwordRecommendations(status, 'Arribo12!');
-  assert.equal(suggestions.length, 5);
+  assert.deepEqual(suggestions.map(check => check.label), ['Una letra mayúscula', 'Un número', 'Un carácter especial']);
   assert.ok(suggestions.every(check => check.met));
   assert.ok(passwordRecommendations(status, 'aaaaaa').some(check => !check.met));
 });

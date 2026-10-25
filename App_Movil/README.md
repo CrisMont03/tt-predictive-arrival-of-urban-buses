@@ -1,6 +1,95 @@
 # ARRIBO — aplicación móvil
 
-Expo SDK 57, TypeScript y Expo Router. Pantallas en `src/app`: acceso, Predicción, Historial, Alertas, Configuración y reporte de espera.
+Expo SDK 58, TypeScript y Expo Router. Pantallas en `src/app`: acceso, Predicción, Historial, Alertas, Configuración y reporte de espera.
+
+## Migración controlada de SDK 57 a SDK 58
+
+La actualización se realizó en `migration/updating-to-sdk58`. Node `24.11.1` y npm
+`11.6.2` son el entorno utilizado. SDK 58 requiere Node 22.13+ en la rama 22,
+24.3+ en la rama 24, o una rama compatible posterior; conservar una versión par
+compatible. Ver las [notas de SDK 58](https://expo.dev/changelog/sdk-58) y la
+[guía de migración de Router](https://docs.expo.dev/router/migrate/sdk-57-to-58/).
+
+Las versiones instaladas son Expo `58.0.19`, Expo Router `58.0.26`, React `19.3.0`
+y React Native `0.88.0`. `package-lock.json` registra el árbol completo; usar
+`npm ci` al instalarlo en otro entorno. Se alinearon los módulos con Expo, se
+actualizaron las referencias de campos a `TextInputInstance`, los tipos de refs
+del componente de pestañas web y el manejo de tema sin preferencia. Los iconos
+conservan los colores de la paleta. Los plugins adicionales de `app.json` fueron
+añadidos por `expo install --fix`.
+
+Dos pruebas de contraseña ya fallaban antes de la actualización: esperaban una
+longitud máxima en la lista visual y cinco recomendaciones. Se corrigieron sus
+expectativas para respetar las opciones actuales del usuario (tres recomendaciones).
+No se cambiaron `auth-validation.ts`, la política Firebase ni el proceso de registro.
+
+El backend Docker, los contratos HTTP, las reglas de Firestore y los recursos de
+GCP no necesitan desplegarse de nuevo por esta migración móvil. La comprobación
+HTTPS de `https://arribo-api-jueg2ew3oq-uc.a.run.app` devuelve `/health` 200,
+`/ready` 503 `MODEL_NOT_READY` y `/predict` sin sesión 401 `UNAUTHENTICATED`.
+Son comprobaciones públicas: no acreditan aún el acceso autenticado desde el iPhone.
+
+### Verificaciones automáticas
+
+- `npx expo install --check`: dependencias compatibles con SDK 58.
+- `npx expo-doctor`: 20/20 comprobaciones aprobadas.
+- `npm run typecheck` y `npm run lint`: aprobados.
+- `npm test`: 41/41 pruebas aprobadas.
+- `npm ci --no-audit --no-fund`: instalación limpia desde el lockfile completada.
+- `npx expo export --platform ios --platform android --max-workers 2 --output-dir /private/tmp/arribo-sdk58-native-export`:
+  exportación terminada con bundles Hermes para ambas plataformas. No instala una
+  app en el teléfono ni verifica las interacciones físicas.
+
+La exportación adicional con `--platform all` se interrumpió al prolongarse la
+fase web, después de compilar las plataformas móviles; macOS también reportó
+temporalmente falta de recursos para crear un proceso durante esa comprobación.
+No se da por aprobada la exportación web. Se completó por separado la exportación
+móvil anterior, que corresponde al alcance de Expo Go en este proyecto.
+
+`npm audit` detectó nueve entradas de severidad alta en dependencias transitivas
+de Expo CLI y Firebase. Su corrección queda pendiente de una revisión específica:
+no se aplicó `npm audit fix --force`, que propone versiones antiguas incompatibles
+de Expo/Firebase. Que Expo Doctor y las pruebas pasen no equivale a una auditoría
+de seguridad aprobada.
+
+### Comprobación manual en iPhone (pendiente)
+
+1. Detener el Metro anterior con `Ctrl+C`. En el `.env` local conservar las
+   variables Firebase y verificar lo siguiente, sin subir ese archivo al repositorio:
+
+   ```dotenv
+   EXPO_PUBLIC_APP_MODE=live
+   EXPO_PUBLIC_API_URL=https://arribo-api-jueg2ew3oq-uc.a.run.app
+   ```
+
+2. Desde `Codigo/App_Movil`, ejecutar `npx expo start --go --clear`, escanear el QR
+   con el iPhone y abrirlo en Expo Go compatible con SDK 58. Metro sigue siendo
+   local; FastAPI ya funciona en GCP y no requiere iniciar el servidor local.
+3. Verificar acceso, Crear cuenta y Recuperar contraseña como rutas separadas.
+   Si se prueba el registro, usar una cuenta de prueba propia y comprobar el nombre
+   en Auth y Firestore. Un resultado parcial no debe crear otra cuenta al reintentar.
+4. Iniciar sesión, recargar/cerrar y reabrir ARRIBO para comprobar persistencia.
+   Cerrar sesión y confirmar que no se puede acceder a las pestañas protegidas.
+5. Abrir las cuatro pestañas y el selector de estación. Comprobar búsqueda, cierre,
+   teclado, modo oscuro y regreso del modal de feedback. En live solo se admite
+   Río Consulado – Misterios para consultas reales.
+6. Solicitar una predicción: debe aparecer la indisponibilidad del predictor, no un
+   error de red. Sin LSTM aprobado no habrá una nueva estimación real ni un caso
+   nuevo para probar miss/hit de una predicción real.
+7. Revisar el historial propio y, si existe una consulta **simulada de prueba sin
+   reporte**, enviar una espera desde ella. Confirmar el mismo `qid` en feedback y
+   `actual_min` en historial. No reemplazar un reporte anterior ni usar consultas
+   ficticias como datos reales. Si no hay ninguna pendiente, posponer este envío.
+8. Revisar alertas: comprobar las activas no vencidas de la estación seleccionada,
+   o el estado vacío cuando no existan. No habilitar push.
+9. Activar ubicación opcional, probar permiso concedido/denegado y regresar a
+   Predicción. El aviso de distancia usa 200 m y no debe bloquear una consulta.
+10. En una consulta de prueba pendiente, comprobar carga, doble toque, desconexión,
+    reporte en cola y reconexión sin duplicación. Confirmar también el aislamiento
+    del historial y de la cola al cambiar entre cuentas de prueba propias.
+
+Estas acciones físicas y las escrituras autenticadas siguen pendientes hasta
+ejecutarlas en el dispositivo. Las pruebas unitarias y la exportación no las sustituyen.
 
 ## Probar sin modelo ni Firebase
 
@@ -9,11 +98,11 @@ npm ci
 npx expo start --go
 ```
 
-Abre la app con Expo Go compatible con SDK 57 y toca **Explorar demostración**. El modo predeterminado es `demo`; todos los resultados se identifican como ejemplos. Configuración permite simular demora, error y listas vacías. No se envía ningún dato a Firebase ni al backend en esta modalidad. Consultas, preferencias y reportes demo se guardan localmente.
+Abre la app con Expo Go compatible con SDK 58 y toca **Explorar demostración**. El modo predeterminado es `demo`; todos los resultados se identifican como ejemplos. Configuración permite simular demora, error y listas vacías. No se envía ningún dato a Firebase ni al backend en esta modalidad. Consultas, preferencias y reportes demo se guardan localmente.
 
 ## Conectar servicios reales
 
-1. Crea `.env` usando `.env.example` y selecciona `EXPO_PUBLIC_APP_MODE=live`.
+1. Crea un `.env` local y selecciona `EXPO_PUBLIC_APP_MODE=live`.
 2. Configura Firebase público (apiKey, authDomain, projectId, appId); nunca pongas una cuenta de servicio en `EXPO_PUBLIC_*`.
 3. Habilita Email/Password en Firebase Auth y Firestore. Publica reglas/índices de `../Firebase` después de probarlos.
 4. Configura `EXPO_PUBLIC_API_URL`. Desde el teléfono, usa la IP LAN del servidor o HTTPS público, no `localhost`. Reinicia Expo después de cambiar variables.
@@ -39,8 +128,8 @@ inválido o fallo transitorio conserva el reporte pendiente; restaurar sin conex
 mantiene su valor y no permite reemplazarlo por otro mientras está pendiente.
 
 Pruebas específicas: `node --experimental-strip-types --test tests/query-flow.test.ts`.
-La suite completa conserva dos discrepancias previas en `auth.test.ts` sobre la
-política de contraseñas; no se modificaron sus requisitos como parte de D.
+La suite completa actual pasa las 41 pruebas; los requisitos de contraseña
+existentes se conservaron durante la migración a SDK 58.
 
 ## Verificar
 
@@ -86,7 +175,7 @@ Una cuenta anterior sin nombre válido en Auth ni Firestore muestra **“Agrega 
 
 ### Contraseñas y ubicación opcional
 
-Crear cuenta distingue los **requisitos obligatorios de Firebase** (incluido el máximo configurado) de las **recomendaciones adicionales**: mínimo 8 caracteres, mayúscula, minúscula, número y símbolo cuando todavía no son obligatorios. No se inventan requisitos remotos ni se cambia la política del proyecto desde la app. Para exigirlos, configurar Firebase Console → Authentication → Settings → Password policy, guardar la política y recargar por completo la app. No activar la actualización forzada al iniciar sesión si se desea conservar el acceso de cuentas anteriores. Las reglas de Firestore no controlan las contraseñas.
+Crear cuenta distingue los **requisitos obligatorios de Firebase** de las **recomendaciones adicionales**: mayúscula, número y símbolo cuando todavía no son obligatorios. La lista visual conserva las opciones elegidas en el código actual; la validación completa sigue a cargo de `validatePassword` y Firebase. No se inventan requisitos remotos ni se cambia la política del proyecto desde la app. Para exigirlos, configurar Firebase Console → Authentication → Settings → Password policy, guardar la política y recargar por completo la app. No activar la actualización forzada al iniciar sesión si se desea conservar el acceso de cuentas anteriores. Las reglas de Firestore no controlan las contraseñas.
 
 Ubicación opcional pide permiso en primer plano y guarda la preferencia. En Predicción se obtiene una posición puntual con precisión equilibrada y se compara con las coordenadas de la estación seleccionada. El aviso de lejanía significa una distancia calculada mayor de 200 metros; depende de la precisión del dispositivo y de las coordenadas configuradas. No bloquea la consulta ni incorpora coordenadas personales al modelo, historial o feedback. No hay seguimiento continuo/en segundo plano, ni se enciende o apaga el GPS del sistema con el interruptor.
 

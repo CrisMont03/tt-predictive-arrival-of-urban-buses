@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { ActivityIndicator, Animated, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useAnimatedValue, useColorScheme, useWindowDimensions, View, type TextInputProps } from 'react-native';
+import { ActivityIndicator, Animated, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useAnimatedValue, useColorScheme, useWindowDimensions, View, type TextInputInstance, type TextInputProps } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { forwardRef, useEffect, useState, type ComponentProps, type ReactNode } from 'react';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
@@ -43,7 +43,7 @@ export function Notice({ children, error = false }: { children: ReactNode; error
   }, [children, error, opacity, reduce]);
   return <Animated.View accessibilityRole={error ? 'alert' : undefined} accessibilityLiveRegion="polite" style={[styles.notice, { opacity, backgroundColor: error ? p.errorSurface : p.soft, borderColor: error ? p.danger : p.border }]}><Ionicons name={error ? 'alert-circle-outline' : 'information-circle-outline'} size={21} color={error ? p.danger : p.blue} /><Label style={[styles.flex, { color: error ? p.danger : p.text, fontSize: 14, lineHeight: 22 }]}>{children}</Label></Animated.View>;
 }
-export const Field = forwardRef<TextInput, TextInputProps & { label: string; error?: string; helper?: string; icon?: ComponentProps<typeof Ionicons>['name'] }>(function Field({ label, error, helper, icon, secureTextEntry, ...props }, ref) {
+export const Field = forwardRef<TextInputInstance, TextInputProps & { label: string; error?: string; helper?: string; icon?: ComponentProps<typeof Ionicons>['name'] }>(function Field({ label, error, helper, icon, secureTextEntry, ...props }, ref) {
   const p = usePalette(); const [focused, setFocused] = useState(false); const [revealed, setRevealed] = useState(false);
   return <View style={styles.gap}><Label style={styles.fieldLabel}>{label}</Label><View style={[styles.inputFrame, { backgroundColor: p.card, borderColor: error ? p.danger : focused ? p.blue : p.fieldBorder, borderWidth: focused || error ? 2 : 1 }]}>
     {icon && <Ionicons accessible={false} name={icon} size={20} color={error ? p.danger : p.blue} />}

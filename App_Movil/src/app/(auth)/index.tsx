@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { useRef, useState } from 'react';
-import { TextInput, View } from 'react-native';
+import { View, type TextInputInstance } from 'react-native';
 import { AuthPage, Button, Field, Label, Notice, styles, TextAction, usePalette } from '@/components/arribo-ui';
 import { useArribo } from '@/state/arribo-provider';
 import { loginErrors } from '@/utils/auth-validation';
@@ -10,7 +10,7 @@ export default function LoginScreen() {
   const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
   const [touched, setTouched] = useState({ email: false, password: false });
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
-  const locked = useRef(false); const passwordRef = useRef<TextInput>(null);
+  const locked = useRef(false); const passwordRef = useRef<TextInputInstance>(null);
   const errors = loginErrors(email, password);
   async function submit() {
     if (locked.current) return;

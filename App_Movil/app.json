@@ -33,7 +33,16 @@
           "imageWidth": 76
         }
       ],
-      ["expo-location", { "locationWhenInUsePermission": "ARRIBO usa tu ubicación solo para indicar si estás cerca de Río Consulado – Misterios." }]
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "ARRIBO usa tu ubicación solo para indicar si estás cerca de Río Consulado – Misterios."
+        }
+      ],
+      "expo-font",
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

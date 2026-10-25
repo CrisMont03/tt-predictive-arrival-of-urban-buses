@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { validatePassword, type PasswordValidationStatus } from 'firebase/auth';
 import { useEffect, useRef, useState } from 'react';
-import { TextInput, View } from 'react-native';
+import { View, type TextInputInstance } from 'react-native';
 import { AuthPage, Button, Field, Label, Notice, styles, usePalette } from '@/components/arribo-ui';
 import { firebaseServices } from '@/services/firebase';
 import { useArribo } from '@/state/arribo-provider';
@@ -17,7 +17,7 @@ export default function RegisterScreen() {
   const [policy, setPolicy] = useState<PasswordValidationStatus | null>(null);
   const [policyPassword, setPolicyPassword] = useState<string | null>(null);
   const [policyError, setPolicyError] = useState<string | null>(null);
-  const locked = useRef(false); const emailRef = useRef<TextInput>(null); const passwordRef = useRef<TextInput>(null); const confirmationRef = useRef<TextInput>(null);
+  const locked = useRef(false); const emailRef = useRef<TextInputInstance>(null); const passwordRef = useRef<TextInputInstance>(null); const confirmationRef = useRef<TextInputInstance>(null);
   const errors = registrationErrors(name, email, password, confirmation);
   const touch = (field: keyof typeof touched) => setTouched(value => ({ ...value, [field]: true }));
   useEffect(() => {
