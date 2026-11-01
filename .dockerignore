@@ -16,3 +16,15 @@
 App_Movil
 Firebase
 Procesamiento_de_videos
+
+# Experimentos locales de ML: fuera del contexto de construcción.
+Dataset/generar_sinteticos.py
+Dataset/preparar_aumento.py
+Modelo/experimento_*.py
+Modelo/experimentos_locales
+Modelo/optimizar_lstm.py
+Modelo/evaluar_final.py
+Modelo/requirements-local.txt
+Modelo/tests
+**/*.h5
+**/*.hdf5

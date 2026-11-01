@@ -61,3 +61,16 @@ firestore-debug.log.*
 ui-debug.log.*
 *.keras
 *.backup-*
+
+# Experimentos locales de ML: conservar en disco, fuera de GitHub.
+# Los tests operativos ya versionados de Backend y Dataset siguen visibles.
+/Dataset/generar_sinteticos.py
+/Dataset/preparar_aumento.py
+/Modelo/experimento_*.py
+/Modelo/experimentos_locales/
+/Modelo/optimizar_lstm.py
+/Modelo/evaluar_final.py
+/Modelo/requirements-local.txt
+/Modelo/tests/
+*.h5
+*.hdf5
