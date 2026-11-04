@@ -3,7 +3,7 @@ from collections import Counter, defaultdict
 
 from app.artifacts import digest, json_bytes
 from app.contracts import Context
-from app.model_inputs import FallbackAccumulator, MAX_WAIT, SCHEMA_VERSION, contract, online_inputs, timestamp
+from app.model_inputs import FallbackAccumulator, MAX_WAIT, SCHEMA_VERSION, FEEDBACK_SCHEMA, contract, online_inputs, timestamp, is_synthetic_source
 from Dataset.preparar_modelo import build as camera_build, local_date, row_context
 
 
@@ -12,7 +12,7 @@ def feedback_rows(reports, cutoff):
     cutoff = timestamp(cutoff)
     for report in reports:
         try:
-            if report.get("simulation") is not False:
+            if report.get("simulation") is not False or is_synthetic_source(report):
                 rejected["simulation_or_unknown_origin"] += 1
                 continue
             query_at, received = timestamp(report["query_at"]), timestamp(report["received_at"])
@@ -31,6 +31,7 @@ def feedback_rows(reports, cutoff):
                        station_id=report["station_id"], context=context, target=float(actual), loss_weight=.5,
                        # received_at means receipt, never a camera bus arrival.
                        query_id=report["query_id"], uid=report["uid"], simulation=False,
+                       wait_basis=report.get("wait_basis", "unspecified"),
                        anomaly_review=actual >= 40)
             if identity in accepted:
                 rejected["duplicate"] += 1
@@ -42,7 +43,7 @@ def feedback_rows(reports, cutoff):
     return list(accepted.values()), dict(rejected)
 
 
-def prepare_mixed(camera_rows, feedback, cutoff, *, window=10, manifest=None, benchmark_ids=()):
+def prepare_mixed(camera_rows, feedback, cutoff, *, window=10, manifest=None, benchmark_ids=(), schema_version=SCHEMA_VERSION):
     cutoff = timestamp(cutoff)
     # Reuse camera validation/verified continuity; rebuild ALL sequences after new partitions.
     base, _ = camera_build(camera_rows, window, manifest)
@@ -105,7 +106,7 @@ def prepare_mixed(camera_rows, feedback, cutoff, *, window=10, manifest=None, be
         histories[group] = [dict(query_id=row["sample_id"], uid=row.get("uid", "camera"),
                                 query_at=row["event_at"], received_at=row["available_at"],
                                 station_id=row["station_id"], actual_min=row["target"], context=row["context"],
-                                simulation=False) for row in events if row["loss_weight"]]
+                                simulation=False, wait_basis=("since_query" if row["source"] == "camera" else row.get("wait_basis", "unspecified"))) for row in events if row["loss_weight"]]
         buses[group] = [row["bus_arrival"] for row in events if row["source"] == "camera" and not row["boundary_excluded"]]
     prefix, position = FallbackAccumulator(), 0
     for row in sorted(rows, key=lambda row: (timestamp(row["event_at"]), row["sample_id"])):
@@ -118,10 +119,26 @@ def prepare_mixed(camera_rows, feedback, cutoff, *, window=10, manifest=None, be
         group = tuple(row["continuity_group"])
         common = dict(now=now, station_id=row["station_id"], fallback=fallback, start_at=starts[group],
                       observations=histories[group])
+        if schema_version == FEEDBACK_SCHEMA:
+            from datetime import timedelta
+            import hashlib
+            full = histories[group]
+            if row["source"] == "camera":
+                # Proxy receipts are never earlier than the derived event. Deterministic 50%/5min replay.
+                full = [{**r, "received_at": max(timestamp(r["received_at"]), timestamp(r["query_at"])+timedelta(minutes=r["actual_min"]))} for r in full]
+                partial = [{**r, "received_at": timestamp(r["received_at"])+timedelta(minutes=5)} for r in full
+                           if int(hashlib.sha256(("2026054:"+r["query_id"]).encode()).hexdigest(),16)/2**256 < .5]
+            else:
+                partial = full
+            common["schema_version"] = schema_version
+            row["operational_inputs"] = online_inputs(row["context"], window, **{**common,"observations":partial})
+            row["cold_inputs"] = online_inputs(row["context"], window, **{**common,"observations":[]})
+            row["inputs"] = online_inputs(row["context"], window, **{**common,"observations":full})
+            continue
         row["operational_inputs"] = online_inputs(row["context"], window, **common)
         row["cold_inputs"] = online_inputs(row["context"], window, **{**common, "observations": []})
         row["inputs"] = online_inputs(row["context"], window, arrivals=buses[group] if row["source"] == "camera" else None, **common)
-    quality = dict(schema_version=SCHEMA_VERSION, window=window, contract=contract(window), fallback=frozen.table,
+    quality = dict(schema_version=schema_version, window=window, contract=contract(window, schema_version), fallback=frozen.table,
                    can_train=all(any(r["split"] == part and r["loss_weight"] for r in rows) for part in ("train", "validation", "test")),
                    meets_collection_goal=sum(r["source"] == "camera" and r["loss_weight"] > 0 for r in rows) >= 5000,
                    counts=dict(Counter(row["source"] for row in rows)), exclusions=dict(excluded),

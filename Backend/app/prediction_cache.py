@@ -11,7 +11,7 @@ from .model_inputs import contract, timestamp
 def cache_key(station_id, context, prepared, observations, metadata, simulation):
     payload = {
         "station_id": station_id, "simulation": simulation,
-        "contract": contract(metadata.get("window", 10)),
+        "contract": contract(metadata.get("window", 10), metadata.get("schema_version", "arribo-sequences-v2")),
         "artifact": {key: metadata.get(key) for key in
                      ("model_version", "model_sha256", "release_id", "manifest_sha256", "scaler", "fallback", "radius", "context_profile")},
         "context": context,

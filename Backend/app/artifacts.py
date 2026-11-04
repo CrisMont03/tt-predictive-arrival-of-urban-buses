@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .model_inputs import SCHEMA_VERSION
+from .model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS
 
 FILES = {"metadata.json": 4_000_000, "model.keras": 250_000_000, "xgboost.json": 100_000_000}
 
@@ -48,7 +48,7 @@ def gcs_parts(uri):
 
 
 def validate_manifest(manifest):
-    if (manifest.get("format") != "arribo-package-v1" or manifest.get("schema_version") != SCHEMA_VERSION
+    if (manifest.get("format") != "arribo-package-v1" or manifest.get("schema_version") not in SUPPORTED_SCHEMAS
             or manifest.get("simulation") is not False
             or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", manifest.get("release_id", ""))):
         raise ValueError("Paquete incompatible o simulado")
@@ -100,7 +100,7 @@ def publish_package(directory, prefix_uri, release_id, *, client=None):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", release_id):
         raise ValueError("Identificador de publicación inválido")
     metadata = read_json(Path(directory) / "metadata.json")
-    if metadata.get("simulation") or metadata.get("schema_version") != SCHEMA_VERSION:
+    if metadata.get("simulation") or metadata.get("schema_version") not in SUPPORTED_SCHEMAS:
         raise ValueError("No publicar simulaciones ni contratos anteriores")
     if digest((Path(directory) / "model.keras").read_bytes()) != metadata["model_sha256"]:
         raise ValueError("Checksum del modelo incorrecto")
@@ -131,7 +131,7 @@ def publish_package(directory, prefix_uri, release_id, *, client=None):
         blob = bucket.blob(f"{prefix}/{release_id}/{name}")
         upload(blob, content)
         files[name] = dict(generation=int(blob.generation), sha256=digest(content), size=len(content))
-    manifest = dict(format="arribo-package-v1", schema_version=SCHEMA_VERSION,
+    manifest = dict(format="arribo-package-v1", schema_version=metadata["schema_version"],
                     release_id=release_id, simulation=False, files=files)
     validate_manifest(manifest)
     content = json_bytes(manifest)

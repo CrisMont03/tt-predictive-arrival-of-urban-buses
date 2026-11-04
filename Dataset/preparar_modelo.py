@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Backend"))
 from app.model_inputs import (
     BUS_FEATURES, FEATURES, LOCAL_ZONE, MAX_WAIT, SCHEMA_VERSION,
     FallbackAccumulator, calendar_context, contract, finite, online_inputs, timestamp,
+    is_synthetic_source,
 )
 
 TEMPORAL_FEATURES = FEATURES
@@ -21,7 +22,7 @@ def local_date(value):
     return timestamp(value).astimezone(LOCAL_ZONE).date().isoformat()
 
 
-def read_rows(path):
+def read_rows(path, *, allow_synthetic=False):
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         rows = list(csv.DictReader(stream))
     seen = set()
@@ -29,6 +30,8 @@ def read_rows(path):
                 "station_id", "camera_id", "arrival_user", "bus_arrival",
                 "waiting_time_min", "is_holiday", "precipitation_mm", "temp_c", "humidity"}
     for index, row in enumerate(rows, 2):
+        if is_synthetic_source(row) and not allow_synthetic:
+            raise ValueError(f"Fila sintética {index}: solo se admite en preparación offline explícita")
         if not required.issubset(row):
             raise ValueError("Reexporta el CSV completo con las 18 columnas")
         track = int(row["track_id_persona"])
@@ -83,9 +86,19 @@ def read_manifest(path):
     return mapping
 
 
-def chronological_split(rows):
+def chronological_split(rows, partitions=None):
     # Entire bus groups remain together; dates refer to local bus completion.
     dates = sorted({local_date(row["bus_arrival"]) for row in rows})
+    if partitions is not None:
+        ranks = {name: i for i, name in enumerate(("train", "validation", "test", "reserve"))}
+        if set(partitions) != set(dates) or not {"train", "validation", "test"} <= set(partitions.values()):
+            raise ValueError("La partición explícita debe cubrir exactamente las fechas y contener train/validation/test")
+        if any(partitions[day] not in ranks for day in dates):
+            raise ValueError("Partición desconocida")
+        order = [ranks[partitions[day]] for day in dates]
+        if order != sorted(order):
+            raise ValueError("Las particiones deben respetar el orden cronológico")
+        return dict(partitions), True
     if len(dates) < 3:
         return {date: "collecting" for date in dates}, False
     train_end = min(len(dates) - 2, max(1, int(len(dates) * .7)))
@@ -99,10 +112,10 @@ def row_context(row):
             **{key: number(row[key]) for key in FEATURES[3:]}}
 
 
-def build(rows, window=10, manifest=None):
+def build(rows, window=10, manifest=None, partitions=None):
     specification = contract(window)
     manifest = manifest or {}
-    split, ready = chronological_split(rows)
+    split, ready = chronological_split(rows, partitions)
     groups, group_starts = defaultdict(list), {}
     verified_bounds = {}
     for group, start, end in manifest.values():
@@ -113,7 +126,8 @@ def build(rows, window=10, manifest=None):
         part = split[local_date(row["bus_arrival"])]
         partition_ends[part] = max(partition_ends.get(part, timestamp(row["bus_arrival"])), timestamp(row["bus_arrival"]))
     cutoffs = {"validation": partition_ends.get("train"),
-               "test": partition_ends.get("validation", partition_ends.get("train"))}
+               "test": partition_ends.get("validation", partition_ends.get("train")),
+               "reserve": partition_ends.get("test")}
     normalized = []
     for original in rows:
         row = dict(original)
@@ -187,7 +201,7 @@ def build(rows, window=10, manifest=None):
     report = dict(rows=len(rows), user_wait=sum(r["record_type"] == "user_wait" for r in normalized),
                   bus_only=sum(r["record_type"] == "bus_only" for r in normalized),
                   unique_buses=sum(len(values) for values in buses.values()),
-                  dates=sorted(split), split_counts=dict(Counter(r["split"] for r in examples)),
+                  dates=sorted(split), partitions=split, split_counts=dict(Counter(r["split"] for r in examples)),
                   coverage_by_hour=dict(sorted(Counter(str(calendar_context(r["event_at"])["hour"]) for r in normalized).items())),
                   eligible_waits=sum(r["eligible"] for r in normalized),
                   boundary_excluded=sum(r["boundary_excluded"] for r in normalized),
@@ -207,11 +221,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="Carpeta nueva; no se sobrescribe")
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--window", type=int, choices=[10, 20, 30], default=10)
+    parser.add_argument("--partitions", type=Path, help="JSON de fecha ISO a train/validation/test/reserve")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Usa una carpeta nueva para conservar resultados anteriores")
     rows = read_rows(args.csv)
-    examples, report = build(rows, args.window, read_manifest(args.manifest))
+    partitions = json.loads(args.partitions.read_text()) if args.partitions else None
+    examples, report = build(rows, args.window, read_manifest(args.manifest), partitions)
     report["source_sha256"] = hashlib.sha256(args.csv.read_bytes()).hexdigest()
     report["manifest_sha256"] = hashlib.sha256(args.manifest.read_bytes()).hexdigest() if args.manifest else None
     args.output.mkdir(parents=True)

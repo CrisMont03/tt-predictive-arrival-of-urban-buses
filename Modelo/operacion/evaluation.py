@@ -3,7 +3,7 @@ import math
 
 from app.artifacts import digest, json_bytes
 from app.contracts import Context
-from app.model_inputs import SCHEMA_VERSION, timestamp
+from app.model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS, timestamp
 
 
 def compare(benchmark, candidate, incumbent, *, synthetic=False):
@@ -22,7 +22,7 @@ def compare(benchmark, candidate, incumbent, *, synthetic=False):
         if predictor is None:
             continue
         meta = predictor.metadata
-        if (meta.get("schema_version") != SCHEMA_VERSION or bool(meta.get("simulation")) != synthetic
+        if (meta.get("schema_version") not in SUPPORTED_SCHEMAS or bool(meta.get("simulation")) != synthetic
                 or not {"training_sample_ids", "calibration_sample_ids"} <= meta.keys()):
             raise ValueError("El artefacto carece de contrato o trazabilidad comparable")
         if ids.intersection(meta["training_sample_ids"] + meta["calibration_sample_ids"]):

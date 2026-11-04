@@ -26,5 +26,10 @@ Modelo/optimizar_lstm.py
 Modelo/evaluar_final.py
 Modelo/requirements-local.txt
 Modelo/tests
+Modelo/feedback_training.py
+Modelo/feedback_evaluation.py
+Modelo/feedback_stress.py
+Modelo/plot_feedback_results.py
+Backend/tests/test_feedback_windows.py
 **/*.h5
 **/*.hdf5

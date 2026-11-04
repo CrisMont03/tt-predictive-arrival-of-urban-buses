@@ -125,7 +125,7 @@ COOLDOWN_REENTRADA_SEG    = 20.0
 PERSONA_GAP_TOL_SEG      = 3.0
 PERSONA_OCLUSION_MAX_SEG = 15.0
 MIN_OBSERVACION_CANDIDATO_SEG = 2.5
-MAX_SALIDA_CANDIDATO_SEG      = 75.0
+MAX_SALIDA_CANDIDATO_SEG      = 120.0
 
 ID_SWITCH_VENTANA_SEG = 25.0
 ID_SWITCH_DIST_MAX    = 80
@@ -537,7 +537,7 @@ def calcular_tiempos_espera(
     Para cada bus confirmado:
       - Si había personas esperando → genera una fila por persona.
       - Si salieron, admite candidatos observados al menos 2.5 segundos y cuya
-        salida ocurrió como máximo 75 segundos antes del bus.
+        salida ocurrió como máximo 120 segundos antes del bus.
       - Si NO había personas esperando → genera fila solo-bus (track_id=-1).
 
     Las personas carry-over (arrival_user anterior al inicio del video actual)

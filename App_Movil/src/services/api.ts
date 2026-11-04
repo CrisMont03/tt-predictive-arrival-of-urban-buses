@@ -40,8 +40,8 @@ export function validatePrediction(result: unknown, expected?: { queryId: string
   }
 }
 
-export async function sendFeedback(queryId: string, actualMin: number) {
-  const result = await apiRequest('/feedback', { query_id: queryId, actual_min: actualMin });
+export async function sendFeedback(queryId: string, actualMin: number, waitBasis?: 'since_query' | 'unspecified') {
+  const result = await apiRequest('/feedback', { query_id: queryId, actual_min: actualMin, ...(waitBasis ? { wait_basis: waitBasis } : {}) });
   try { assertFeedbackAcknowledgement(result, queryId); } catch {
     throw new ApiError('INVALID_RESPONSE', 'No se pudo confirmar el reporte. Reintenta.', 502);
   }

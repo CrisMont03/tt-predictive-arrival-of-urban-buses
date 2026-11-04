@@ -68,6 +68,8 @@ DB_PATH       = RAIZ / "output" / "dataset_maestro.db"
 CSV_FINAL     = RAIZ / "output" / "dataset_final.csv"
 STATION_ID    = "rio_consulado"
 CAMERA_ID     = "rio_consulado_cctv_1"
+SELECTED_DATES = None
+WEATHER_CACHE = None
 
 # Coordenadas de la estación Río Consulado – Misterios (CDMX)
 ESTACION_LAT  = 19.4624
@@ -135,30 +137,49 @@ def encontrar_csvs_v2() -> list[Path]:
     Estructura esperada: Dataset/Dataset/YYYY-MM-DD/{hora}/Video{HORA}_v4_dataset.csv
     Cada archivo corresponde a una franja horaria procesada por procesar_video_v4.py.
     """
-    encontrados = []
+    return daily_csvs(RESULTADOS, SELECTED_DATES)
 
-    for csv_path in RESULTADOS.rglob("*_v4_dataset.csv"):
-        encontrados.append(csv_path)
 
-    return sorted(encontrados)
+def daily_csvs(root, dates=None):
+    """Only daily dataset/datasets CSVs; never recurse into auxiliary folders."""
+    selected = set(dates) if dates is not None else None
+    found = []
+    for day in sorted(Path(root).glob("????_??_??")):
+        try:
+            date_key = datetime.strptime(day.name, "%Y_%m_%d").date().isoformat()
+        except ValueError:
+            continue
+        if not day.is_dir() or (selected is not None and date_key not in selected):
+            continue
+        for folder in ("dataset", "datasets"):
+            found.extend((day / folder).glob("*_v4_dataset.csv"))
+    return sorted(found)
+
+
+def validate_row(row, path, index):
+    """Existing numeric/time checks, with source location on every failure."""
+    try:
+        track = int(row["track_id_persona"])
+        minutes, seconds = float(row["waiting_time_min"]), float(row["waiting_time_seg"])
+        start, end = datetime.fromisoformat(row["arrival_user"]), datetime.fromisoformat(row["bus_arrival"])
+        if track < -1 or not all(math.isfinite(v) and v >= 0 for v in (minutes, seconds)) or end < start:
+            raise ValueError("Evento inválido")
+        if track == -1 and (minutes != 0 or seconds != 0 or start != end):
+            raise ValueError("Centinela inválido")
+        if track >= 0 and abs((end - start).total_seconds() / 60 - minutes) > .1:
+            raise ValueError("Espera/timestamp inconsistente")
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError(f"{error}: {path}:{index}") from error
 
 
 def leer_csv(path: Path) -> list[dict]:
     filas = []
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         if not set(COLS_CSV).issubset(reader.fieldnames or []):
             raise ValueError(f"Columnas incompletas: {path}")
         for index, row in enumerate(reader, 2):
-            track = int(row["track_id_persona"])
-            minutes, seconds = float(row["waiting_time_min"]), float(row["waiting_time_seg"])
-            start, end = datetime.fromisoformat(row["arrival_user"]), datetime.fromisoformat(row["bus_arrival"])
-            if track < -1 or not all(math.isfinite(value) and value >= 0 for value in [minutes, seconds]) or end < start:
-                raise ValueError(f"Evento inválido: {path}:{index}")
-            if track == -1 and (minutes != 0 or seconds != 0):
-                raise ValueError(f"Centinela inválido: {path}:{index}")
-            if track >= 0 and abs((end - start).total_seconds() / 60 - minutes) > .1:
-                raise ValueError(f"Espera/timestamp inconsistente: {path}:{index}")
+            validate_row(row, path, index)
             filas.append(row)
     return filas
 
@@ -282,9 +303,19 @@ def obtener_clima_openmeteo(fecha_str: str) -> dict[int, dict] | None:
             "&hourly=temperature_2m,relative_humidity_2m,precipitation"
             "&timezone=America%2FMexico_City"
         )
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        cache = (Path(WEATHER_CACHE) / f"{ESTACION_LAT:.4f}_{ESTACION_LON:.4f}_{fecha_str}.json"
+                 if WEATHER_CACHE else None)
+        import json
+        if cache and cache.exists():
+            data = json.loads(cache.read_text(encoding="utf-8"))["response"]
+        else:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if cache:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                with cache.open("x", encoding="utf-8") as stream:
+                    json.dump({"url": url, "response": data}, stream, allow_nan=False)
 
         hourly       = data["hourly"]
         tiempos      = hourly["time"]          # ["2025-06-02T00:00", ...]
@@ -530,7 +561,7 @@ def cmd_exportar() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global DB_PATH, CSV_FINAL, RESULTADOS, STATION_ID, CAMERA_ID
+    global DB_PATH, CSV_FINAL, RESULTADOS, STATION_ID, CAMERA_ID, SELECTED_DATES, WEATHER_CACHE
     p = argparse.ArgumentParser(
         description="TT 2026-B050 | Consolidación y enriquecimiento del dataset"
     )
@@ -540,6 +571,8 @@ def main() -> None:
     p.add_argument("--resultados", type=Path, default=RESULTADOS, help="Directorio de CSVs por video")
     p.add_argument("--station-id", default=STATION_ID)
     p.add_argument("--camera-id", default=CAMERA_ID)
+    p.add_argument("--dates", action="append", help="Fecha ISO autorizada; repetir --dates para añadir fechas")
+    p.add_argument("--weather-cache", type=Path, help="Respuestas históricas para reproducir el enriquecimiento")
 
     sub.add_parser(
         "consolidar",
@@ -560,6 +593,7 @@ def main() -> None:
     args = p.parse_args()
     DB_PATH, CSV_FINAL, RESULTADOS = args.db, args.csv_final, args.resultados
     STATION_ID, CAMERA_ID = args.station_id, args.camera_id
+    SELECTED_DATES, WEATHER_CACHE = args.dates, args.weather_cache
 
     if args.comando == "consolidar":
         cmd_consolidar()

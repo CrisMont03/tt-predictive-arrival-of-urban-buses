@@ -28,7 +28,7 @@ type AppState = {
   login: (email: string, password: string) => Promise<void>;
   registerAccount: (name: string, email: string, password: string) => Promise<void>;
   enterDemo: () => Promise<void>; logout: () => Promise<void>; resetPassword: (email: string) => Promise<void>;
-  predict: () => Promise<Prediction>; feedback: (queryId: string, minutes: number) => Promise<'sent' | 'queued'>;
+  predict: () => Promise<Prediction>; feedback: (queryId: string, minutes: number, waitBasis?: 'since_query' | 'unspecified') => Promise<'sent' | 'queued'>;
   updatePreferences: (changes: Partial<Preferences>) => Promise<void>;
   refreshHistory: (more?: boolean) => Promise<void>; retryPending: () => Promise<void>;
   setScenario: (value: DemoScenario) => void;
@@ -262,7 +262,7 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
     const uid = session.uid; sending.current = uid;
     try {
       for (const report of [...queueRef.current]) {
-        await sendFeedback(report.query_id, report.actual_min);
+        await sendFeedback(report.query_id, report.actual_min, report.wait_basis);
         if (activeUid.current !== uid) return;
         queueRef.current = queueRef.current.filter(item => item.query_id !== report.query_id); setPending([...queueRef.current]);
         setHistory(previous => previous.map(item => item.query_id === report.query_id ? { ...item, actual_min: report.actual_min, feedback_pending: false } : item));
@@ -339,17 +339,17 @@ export function ArriboProvider({ children }: { children: ReactNode }) {
       onResult: result => setHistory(previous => [{ ...result, requested_at: result.requested_at ?? new Date().toISOString() }, ...previous.filter(item => item.query_id !== result.query_id)]),
     });
   }
-  async function feedback(queryId: string, minutes: number): Promise<'sent' | 'queued'> {
+  async function feedback(queryId: string, minutes: number, waitBasis?: 'since_query' | 'unspecified'): Promise<'sent' | 'queued'> {
     const original = history.find(item => item.query_id === queryId);
     if (!session || !original) throw new Error('No se encontró la consulta.');
     if (!Number.isFinite(minutes) || minutes < 0 || minutes > 180) throw new Error('Ingresa una espera entre 0 y 180 minutos.');
-    const uid = session.uid; const report: PendingFeedback = { query_id: queryId, actual_min: minutes, station_id: original.station_id };
+    const uid = session.uid; const report: PendingFeedback = { query_id: queryId, actual_min: minutes, station_id: original.station_id, ...(waitBasis ? { wait_basis: waitBasis } : {}) };
     // A lost acknowledgement may already have committed on the server.
     // Never replace an uncertain pending value with a different report.
     enqueueFeedback(queueRef.current, report);
     if (!session.demo && online) {
       try {
-        await sendFeedback(report.query_id, report.actual_min);
+        await sendFeedback(report.query_id, report.actual_min, report.wait_basis);
         if (activeUid.current !== uid) throw new Error('La sesión cambió.');
         setHistory(previous => previous.map(item => item.query_id === queryId ? { ...item, actual_min: minutes, feedback_pending: false } : item)); return 'sent';
       } catch (failure) { if (!retryableFeedbackError(failure)) throw failure; }

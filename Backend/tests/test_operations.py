@@ -356,3 +356,15 @@ def test_tagged_revision_urls_survive_traffic_switch_and_rollback():
     values = CloudRunDriver.targets({"new": 100}, statuses)
     assert next(row for row in values if row["tag"] == "new-tag")["percent"] == 100
     assert next(row for row in values if row["tag"] == "old-tag")["percent"] == 0
+
+
+def test_monthly_feedback_contract_preserves_basis_and_partial_arrivals(tmp_path):
+    from app.model_inputs import FEEDBACK_SCHEMA, contract
+    confirmed=report(day=12,wait_basis='since_query')
+    parsed,_=feedback_rows([confirmed], '2026-10-20T00:00:00Z')
+    assert parsed[0]['wait_basis']=='since_query'
+    rows,quality=prepare_mixed(camera_file(tmp_path),[confirmed], '2026-10-20T00:00:00Z',window=20,schema_version=FEEDBACK_SCHEMA)
+    assert quality['contract']==contract(20,FEEDBACK_SCHEMA)
+    assert all(len(row['operational_inputs']['step_mask'])==20 for row in rows)
+    assert all(row['cold_inputs']['bus_mask']==[[0]*4]*20 for row in rows)
+    assert all('arrival_evidence' in row['operational_inputs'] for row in rows)

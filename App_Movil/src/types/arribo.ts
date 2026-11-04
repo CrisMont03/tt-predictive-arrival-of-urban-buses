@@ -32,7 +32,7 @@ export type Prediction = {
 };
 
 export type HistoryEntry = Prediction & { requested_at?: string; actual_min?: number; feedback_pending?: boolean };
-export type PendingFeedback = { query_id: string; actual_min: number; station_id: string };
+export type PendingFeedback = { query_id: string; actual_min: number; station_id: string; wait_basis?: 'since_query' | 'unspecified' };
 export type Preferences = { preferred_station: string; gps_enabled: boolean; notifications_enabled: boolean };
 export type Alert = {
   id: string;

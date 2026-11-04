@@ -38,6 +38,8 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
         if directory:
             predictor = Predictor(directory)
             if manifest:
+                if manifest["schema_version"] != predictor.metadata["schema_version"]:
+                    raise ValueError("El contrato del manifiesto y del modelo no coincide")
                 predictor.metadata["release_id"] = manifest["release_id"]
                 predictor.metadata["manifest_sha256"] = os.environ["ARRIBO_MODEL_MANIFEST_SHA256"]
     if getattr(predictor, "kind", None) == "integration" and not allow_integration:
@@ -114,14 +116,15 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
         else:
             external = dict(await (context_provider or fetch_context)())
             context_sources = external.pop("_sources", None)
-            observations = select_observations(
-                store.recent_observations(body.station_id, now - timedelta(hours=2)),
-                now, body.station_id, predictor.metadata.get("window", 10))
+            raw_reports = store.recent_observations(body.station_id, now - timedelta(hours=2))
+            observations = (raw_reports if predictor.metadata.get("schema_version") == "arribo-sequences-feedback-v1"
+                            else select_observations(raw_reports, now, body.station_id, predictor.metadata.get("window", 10)))
         context = Context(hour=local.hour, day_of_week=local.weekday(), is_weekend=int(local.weekday() >= 5), is_holiday=int(local.date() in holidays.Mexico(years=local.year)), **external)
         window = 10 if mode == "demo" else predictor.metadata.get("window", 10)
         prepared = online_inputs(context.model_dump(), window, now=now, station_id=body.station_id,
                                  observations=observations,
-                                 fallback=None if mode == "demo" else predictor.metadata.get("fallback"))
+                                 fallback=None if mode == "demo" else predictor.metadata.get("fallback"),
+                                 schema_version="arribo-sequences-v2" if mode == "demo" else predictor.metadata.get("schema_version", "arribo-sequences-v2"))
         metadata = {"model_version": version, "window": window} if mode == "demo" else predictor.metadata
         key = cache_key(body.station_id, context.model_dump(), prepared, observations, metadata, simulation)
         cached = reusable_prediction(store.get_cache(key), clock(), body.station_id, version, simulation)
@@ -129,8 +132,8 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
             logging.getLogger("arribo").info("prediction.cache_hit station=%s model=%s simulation=%s", body.station_id, version, simulation)
             value = {**cached, "source": "cache", "query_id": body.request_id}
         else:
-            wait, interval = (12.3, (8, 17)) if mode == "demo" else predictor.predict(
-                context.model_dump(), observations, now=now, station_id=body.station_id)
+            wait, interval = (12.3, (8, 17)) if mode == "demo" else (predictor.predict_prepared(prepared) if hasattr(predictor, "predict_prepared") else predictor.predict(
+                context.model_dump(), observations, now=now, station_id=body.station_id))
             generated_at = clock()
             expires_at = cache_expiration(generated_at, context_sources)
             if expires_at <= generated_at:
@@ -146,6 +149,9 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
         if not original:
             raise HTTPException(404, {"code": "QUERY_NOT_FOUND", "message": "No se encontró esta consulta en tu cuenta."})
         report = {"query_id": body.query_id, "uid": uid, "station_id": original["station_id"], "actual_min": body.actual_min, "predicted_min": original["waiting_time_min"], "error_min": body.actual_min - original["waiting_time_min"], "context": original["context"], "query_at": original.get("requested_at", original["timestamp"]), "received_at": clock(), "simulation": original["simulation"], "outside_domain": body.actual_min > 45, "model_version": original["model_version"]}
+        from .feedback_arrivals import arrival_fields
+        report.update(arrival_fields(report["query_at"], body.actual_min, report["received_at"],
+                                     body.wait_basis, simulation=original["simulation"]))
         if original.get("context_sources") is not None:
             report["context_sources"] = original["context_sources"]
         try:

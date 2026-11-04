@@ -7,13 +7,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "Backend")]
 from app.artifacts import digest, download_package, gcs_parts, immutable_json, json_bytes, publish_package, read_json
-from app.model_inputs import SCHEMA_VERSION, select_observations, timestamp
+from app.model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS, select_observations, timestamp
 from app.predictor import Predictor
 from Dataset.preparar_modelo import read_rows, read_manifest
 from Modelo.operacion.data import feedback_rows, prepare_mixed
@@ -47,7 +47,9 @@ def monthly_benchmark(reports, cutoff, *, minimum=30):
         raise ValueError("Benchmark insuficiente: faltan observaciones recientes")
     cases = []
     for row in sorted(selected, key=lambda item: (timestamp(item["event_at"]), item["sample_id"])):
-        observations = select_observations(reports, row["event_at"], row["station_id"], 30)
+        at = timestamp(row["event_at"])
+        observations = [r for r in reports if r.get("station_id") == row["station_id"]
+                        and at-timedelta(hours=2) <= timestamp(r["received_at"]) < at]
         cases.append(dict(sample_id=row["sample_id"], station_id=row["station_id"], query_at=row["event_at"],
                           context=row["context"], target=row["target"], simulation=False,
                           observations=observations))
@@ -57,6 +59,9 @@ def monthly_benchmark(reports, cutoff, *, minimum=30):
 def train_real(preparation, output, run_id, *, synthetic=False, epochs=50):
     command = [sys.executable, str(ROOT / "Modelo" / "entrenar.py"), "--data", str(preparation),
                "--output", str(output), "--version", run_id, "--epochs", str(epochs)]
+    quality = read_json(Path(preparation) / "quality.json")
+    if quality.get("schema_version") == "arribo-sequences-feedback-v1":
+        command.extend(["--model", "lstm", "--units", "16", "--seed", "2026050"])
     if synthetic:
         command.append("--synthetic")
     subprocess.run(command, check=True)
@@ -84,7 +89,7 @@ def cycle(registry, work, *, run_id, inputs, prepare, train, evaluate, upload=No
             raise ValueError("Snapshot inmutable incompatible")
         record = dict(run_id=run_id, snapshot_sha256=snapshot_hash, simulation=inputs["simulation"],
                       status="preparing", stages=[], attempts=(previous or {}).get("attempts", 0) + 1,
-                      schema_version=SCHEMA_VERSION, started_at=datetime.now(timezone.utc).isoformat(),
+                      schema_version=inputs.get("spec", {}).get("schema_version", SCHEMA_VERSION), started_at=datetime.now(timezone.utc).isoformat(),
                       code_revision=os.getenv("ARRIBO_CODE_REVISION", "local-unrecorded"),
                       dependencies={name: importlib.metadata.version(name) for name in ("firebase-admin", "httpx")})
         for name in ("tensorflow", "numpy", "xgboost"):
@@ -165,7 +170,7 @@ def cloud_run(args):
                     generation=os.environ["ARRIBO_TRAINING_SPEC_GENERATION"],
                     sha256=os.environ["ARRIBO_TRAINING_SPEC_SHA256"])
     spec = json.loads(pinned_object(spec_ref, client, limit=1_000_000))
-    if spec.get("simulation") is not False or spec.get("schema_version") != SCHEMA_VERSION:
+    if spec.get("simulation") is not False or spec.get("schema_version") not in SUPPORTED_SCHEMAS:
         raise ValueError("Especificación real incompatible")
     registry = GCSRegistry(os.environ["ARRIBO_REGISTRY_URI"], client)
     now = datetime.now(ZoneInfo("America/Mexico_City"))
@@ -209,8 +214,9 @@ def cloud_run(args):
         fit_cutoff = min(timestamp(case["query_at"]) for case in benchmark["cases"])
         fit_cutoff = min(fit_cutoff, timestamp(inputs["cutoff"]))
         return prepare_mixed(read_rows(csv_path), inputs["feedback"], fit_cutoff,
-                             window=inputs["spec"].get("window", 10), manifest=manifest,
-                             benchmark_ids=[case["sample_id"] for case in benchmark["cases"]])
+                             window=inputs["spec"].get("window", 20 if inputs["spec"]["schema_version"] == "arribo-sequences-feedback-v1" else 10), manifest=manifest,
+                             benchmark_ids=[case["sample_id"] for case in benchmark["cases"]],
+                             schema_version=inputs["spec"]["schema_version"])
 
     result = cycle(registry, root, run_id=run_id, inputs=frozen, prepare=prepare,
                  train=lambda data, output, version: train_real(data, output, version, epochs=spec.get("epochs", 50)),

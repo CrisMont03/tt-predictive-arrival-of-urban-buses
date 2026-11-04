@@ -36,7 +36,7 @@ class MemoryStore:
     def save_feedback(self, uid, query_id, value):
         with self.lock:
             existing = self.reports.get((uid, query_id))
-            if existing and existing["actual_min"] != value["actual_min"]:
+            if existing and (existing["actual_min"] != value["actual_min"] or existing.get("wait_basis", "unspecified") != value.get("wait_basis", "unspecified")):
                 raise FeedbackConflict("Ya existe un reporte diferente para esta consulta.")
             self.reports.setdefault((uid, query_id), deepcopy(value))
             self.queries[(uid, query_id)]["actual_min"] = value["actual_min"]
@@ -83,7 +83,7 @@ class FirestoreStore:
         @firestore.transactional
         def save(transaction):
             existing = ref.get(transaction=transaction).to_dict()
-            if existing and existing["actual_min"] != value["actual_min"]:
+            if existing and (existing["actual_min"] != value["actual_min"] or existing.get("wait_basis", "unspecified") != value.get("wait_basis", "unspecified")):
                 raise FeedbackConflict("Ya existe un reporte diferente para esta consulta.")
             if not existing:
                 transaction.set(ref, value)

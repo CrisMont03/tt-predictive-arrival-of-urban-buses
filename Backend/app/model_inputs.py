@@ -6,6 +6,8 @@ from math import isfinite, sqrt
 from zoneinfo import ZoneInfo
 
 SCHEMA_VERSION = "arribo-sequences-v2"
+FEEDBACK_SCHEMA = "arribo-sequences-feedback-v1"
+SUPPORTED_SCHEMAS = (SCHEMA_VERSION, FEEDBACK_SCHEMA)
 FEATURES = ["hour", "day_of_week", "is_weekend", "is_holiday", "precipitation_mm", "temp_c", "humidity"]
 BUS_FEATURES = ["minutes_since_bus", "interval_1_min", "interval_2_min", "interval_3_min"]
 UNITS = ["hour_0_23", "weekday_0_6", "binary", "binary", "mm", "degC", "percent"]
@@ -35,6 +37,12 @@ def finite(value):
     return result
 
 
+def is_synthetic_source(record):
+    """Data augmentation provenance, distinct from simulated API predictions."""
+    return (record.get("source") == "synthetic"
+            or str(record.get("is_synthetic", "")).lower() in ("true", "1"))
+
+
 @lru_cache(maxsize=32)
 def _holidays(year):
     try:
@@ -52,7 +60,16 @@ def calendar_context(at):
                 is_holiday=int(local.date() in dates) if dates is not None else None)
 
 
-def contract(window):
+def contract(window, schema_version=SCHEMA_VERSION):
+    if schema_version not in SUPPORTED_SCHEMAS:
+        raise ValueError("Contrato desconocido")
+    if schema_version == FEEDBACK_SCHEMA:
+        value = contract(window)
+        value.update(schema_version=schema_version,
+                     bus_features=["minutes_since_reported_bus", "reported_interval_1_min", "reported_interval_2_min", "reported_interval_3_min"],
+                     arrival_policy="feedback-derived-arrivals-v1", group_seconds=60,
+                     bus_horizon_seconds=7200, bus_availability="received-before-each-step; partial-reports")
+        return value
     if window not in WINDOWS:
         raise ValueError("Ventana permitida: 10, 20 o 30")
     return dict(schema_version=SCHEMA_VERSION, window=window, input_width=INPUT_WIDTH,
@@ -65,7 +82,7 @@ def contract(window):
                 sequence_policy="available-reports_then_current; fallback-before-oldest-report-v1")
 
 
-def select_observations(observations, now, station_id, window, start_at=None):
+def select_observations(observations, now, station_id, window, start_at=None, *, allow_offline_synthetic=False):
     """Check availability at prediction time, not at the report's own query."""
     contract(window)
     now = timestamp(now)
@@ -74,6 +91,8 @@ def select_observations(observations, now, station_id, window, start_at=None):
         lower = max(lower, timestamp(start_at))
     unique = {}
     for report in observations or []:
+        if is_synthetic_source(report) and not allow_offline_synthetic:
+            continue
         if report.get("simulation") or report.get("outside_domain") or report.get("station_id", station_id) != station_id:
             continue
         try:
@@ -154,13 +173,21 @@ def _step(context, at, wait=None, origin="missing", buses=None):
 
 
 def online_inputs(context, window, *, now, station_id="rio_consulado", observations=None,
-                  fallback=None, start_at=None, arrivals=None):
-    """The same recipe for videos and serving; arrivals is for offline experiments.
+                  fallback=None, start_at=None, arrivals=None, allow_offline_synthetic=False,
+                  schema_version=SCHEMA_VERSION):
+    """Shared sequence recipe, dispatched by the artifact's explicit contract.
 
-    Never derive bus arrivals from feedback received_at or query_at + actual_min.
+    Legacy v2 uses offline camera arrivals only. The feedback contract derives
+    arrivals exclusively from confirmed since-query reports and receipt cutoffs.
+    received_at itself is never interpreted as a bus arrival.
     """
+    contract(window, schema_version)
+    if schema_version == FEEDBACK_SCHEMA and arrivals is not None:
+        raise ValueError("El contrato de feedback no acepta llegadas completas de cámara")
+    observations = list(observations or [])
     now = timestamp(now)
-    reports = select_observations(observations, now, station_id, window, start_at)
+    reports = select_observations(observations, now, station_id, window, start_at,
+                                  allow_offline_synthetic=allow_offline_synthetic)
     lower = now - timedelta(seconds=HORIZON_SECONDS)
     if start_at is not None:
         lower = max(lower, timestamp(start_at))
@@ -187,6 +214,10 @@ def online_inputs(context, window, *, now, station_id="rio_consulado", observati
     provenance.append({"kind": "current", "query_at": now.isoformat()})
     inputs = {key: [step[key] for step in steps] for key in steps[0]}
     inputs["provenance"] = provenance
+    if schema_version == FEEDBACK_SCHEMA:
+        from .feedback_arrivals import apply_arrival_context
+        apply_arrival_context(inputs, observations, now, station_id, start_at=start_at,
+                              allow_offline_synthetic=allow_offline_synthetic)
     validate_inputs(inputs, window)
     return inputs
 

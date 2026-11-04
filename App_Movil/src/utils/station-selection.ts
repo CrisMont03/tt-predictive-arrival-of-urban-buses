@@ -28,6 +28,6 @@ export async function resolveStationPrediction(stationId: string, isCurrent: () 
   return result;
 }
 // Backend derives station_id from query_id. Local metadata is not sent.
-export function feedbackPayload(report: Pick<PendingFeedback, 'query_id' | 'actual_min'>) {
-  return { query_id: report.query_id, actual_min: report.actual_min };
+export function feedbackPayload(report: Pick<PendingFeedback, 'query_id' | 'actual_min' | 'wait_basis'>) {
+  return { query_id: report.query_id, actual_min: report.actual_min, ...(report.wait_basis ? { wait_basis: report.wait_basis } : {}) };
 }

@@ -53,3 +53,5 @@ class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query_id: str = Field(min_length=8, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
     actual_min: float = Field(ge=0, le=180, allow_inf_nan=False)
+
+    wait_basis: Literal["since_query", "unspecified"] = "unspecified"

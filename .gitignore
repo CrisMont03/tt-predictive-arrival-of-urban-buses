@@ -72,5 +72,11 @@ ui-debug.log.*
 /Modelo/evaluar_final.py
 /Modelo/requirements-local.txt
 /Modelo/tests/
+/Modelo/feedback_training.py
+/Modelo/feedback_evaluation.py
+/Modelo/feedback_stress.py
+/Modelo/plot_feedback_results.py
+# Replay experimental que depende del entrenador local anterior.
+/Backend/tests/test_feedback_windows.py
 *.h5
 *.hdf5

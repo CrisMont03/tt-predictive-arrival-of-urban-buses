@@ -249,3 +249,25 @@ def test_alerts_have_visible_and_hidden_cases_and_can_be_retired(environment):
     assert all(row["message"].startswith("PRUEBA") for row in visible)
     assert len(retire_alerts(db, documents)["retired"]) == 5
     assert all(not db.document(path).get().to_dict()["active"] for path in documents if path.startswith("alerts/"))
+
+
+def test_confirmed_arrival_is_persisted_transactionally_and_retry_keeps_receipt(environment):
+    from app.model_inputs import FEEDBACK_SCHEMA, online_inputs
+    db,documents,store,_,run_id=environment
+    identifier=query_id(run_id)
+    at=datetime(2026,11,2,12,30,tzinfo=timezone.utc)
+    store.query_ref(DEFAULT_UID,identifier).update({'simulation':False,'requested_at':at})
+    received=at+timedelta(minutes=16)
+    body=dict(query_id=identifier,actual_min=15,wait_basis='since_query')
+    with TestClient(create_app('production',store=store,clock=lambda:received)) as api:
+        assert api.post('/feedback',headers=owner_headers(),json=body).status_code==200
+        assert api.post('/feedback',headers=owner_headers(),json=body).status_code==200
+        assert api.post('/feedback',headers=owner_headers(),json={**body,'wait_basis':'unspecified'}).status_code==409
+    saved=db.document(f'feedback/{DEFAULT_UID}/entries/{identifier}').get().to_dict()
+    assert saved['derived_bus_arrival_at']==at+timedelta(minutes=15)
+    assert saved['received_at']==received and saved['arrival_eligible'] is True
+    assert store.get_query(DEFAULT_UID,identifier)['actual_min']==15
+    now=at+timedelta(minutes=20)
+    reports=store.recent_observations('rio_consulado',at-timedelta(hours=2))
+    prepared=online_inputs({},20,now=now,observations=reports,schema_version=FEEDBACK_SCHEMA)
+    assert prepared['bus_context'][-1]==[5,0,0,0]

@@ -11,7 +11,7 @@ export function withPendingFeedback(history: HistoryEntry[], pending: PendingFee
 
 export function enqueueFeedback(queue: PendingFeedback[], report: PendingFeedback): PendingFeedback[] {
   const existing = queue.find(item => item.query_id === report.query_id);
-  if (existing && (existing.actual_min !== report.actual_min || existing.station_id !== report.station_id)) {
+  if (existing && (existing.actual_min !== report.actual_min || existing.station_id !== report.station_id || (existing.wait_basis ?? 'unspecified') !== (report.wait_basis ?? 'unspecified'))) {
     throw new Error('Ya existe un reporte pendiente para esta consulta. Reintenta su envío sin cambiarlo.');
   }
   return existing ? [...queue] : [...queue, report];
