@@ -123,12 +123,18 @@ class CloudRunDriver:
 
 
 def promote(registry, driver, package, evaluation, *, expected_incumbent, model_version,
-            manual_initial=False, enabled=False):
+            manual_initial=False, manual_release=False, enabled=False):
     if not enabled:
         return {"status": "disabled"}
     if evaluation.get("simulation") is not False:
         raise ValueError("Una simulación nunca autoriza publicar")
-    if not evaluation.get("publishable") and not (manual_initial and evaluation.get("decision") == "manual_initial_approval"):
+    manual_replacement = manual_release and evaluation.get('decision') == 'manual_replacement_approval'
+    if manual_replacement:
+        grant = evaluation.get('manual_release_exception', {})
+        if (grant.get('previous', {}).get('model_version') != expected_incumbent
+                or grant.get('model_version') != model_version or not expected_incumbent):
+            raise ValueError('La sustitución manual no corresponde al vigente')
+    if not evaluation.get("publishable") and not manual_replacement and not (manual_initial and evaluation.get("decision") == "manual_initial_approval"):
         raise ValueError("No existe mejora aprobable")
     if evaluation.get("candidate_version") != model_version or evaluation.get("incumbent_version") != expected_incumbent:
         raise ValueError("La comparación no corresponde a estas versiones")
@@ -153,6 +159,8 @@ def promote(registry, driver, package, evaluation, *, expected_incumbent, model_
             raise ValueError("El vigente cambió desde la evaluación")
         if current is None and expected_incumbent is not None:
             raise ValueError("Primero registra/aprueba la publicación inicial")
+        if manual_replacement and current != evaluation['manual_release_exception']['previous']:
+            raise ValueError('El paquete o revisión anterior cambió desde la autorización')
         previous_traffic = driver.traffic()
         if current is None and hasattr(driver, "baseline_ready") and not driver.baseline_ready():
             raise ValueError("La revisión base no coincide con una primera publicación sin modelo")

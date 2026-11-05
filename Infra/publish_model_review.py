@@ -4,12 +4,13 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT),str(ROOT/'Backend')]
 from app.artifacts import digest,json_bytes,publish_package,read_json
 from app.initial_approval import valid
+from app.manual_release import valid as valid_manual
 from Infra.cloud_session import credentials
 
 p=argparse.ArgumentParser();p.add_argument('--package',type=Path,required=True);p.add_argument('--acceptance',type=Path,required=True)
 p.add_argument('--output',type=Path,required=True);p.add_argument('--execute',action='store_true');p.add_argument('--confirm-dev-project');a=p.parse_args()
 meta=read_json(a.package/'metadata.json')
-if not valid(meta):raise ValueError('El paquete no tiene la autorización inicial esperada')
+if not (valid(meta) or valid_manual(meta)):raise ValueError('El paquete no tiene una autorización específica válida')
 if not a.execute:print('Inspección: no se publica nada');sys.exit(0)
 if a.confirm_dev_project!='arribo-68326':raise ValueError('Confirma el proyecto')
 from google.cloud import storage

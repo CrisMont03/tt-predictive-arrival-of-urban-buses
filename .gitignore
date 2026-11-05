@@ -80,3 +80,12 @@ ui-debug.log.*
 /Backend/tests/test_feedback_windows.py
 *.h5
 *.hdf5
+/Dataset/augment_next_bus.py
+/Dataset/expand_synthetic_people.py
+/Modelo/augment_next_bus.py
+/Modelo/compare_next_bus_xgb.py
+/Modelo/search_next_bus*.py
+/Modelo/verify*next_bus.py
+/Modelo/verify_augment_next_bus.py
+/Modelo/preview_next_bus.py
+/Backend/tests/test_next_bus_augmentation.py

@@ -28,8 +28,12 @@ with np.load(a.acceptance_file) as archive:
         print('Verificando '+name,file=sys.stderr,flush=True)
         inputs={key:archive[f'{name}_{key}'] for key in ('sequence','step_mask')}
         expected=archive[f'{name}_expected']
-        actual=np.clip(predictor.model(inputs,training=False).numpy().reshape(-1),0,45)
-        if len(expected)!=163 or not np.isfinite(actual).all():raise ValueError('Cobertura incompleta')
+        raw=predictor.model(inputs,training=False).numpy().reshape(-1)
+        actual=np.maximum(0,raw) if predictor.metadata.get('target_definition')=='next_bus_wait' else np.clip(raw,0,45)
+        if (not len(expected) or len(actual)!=len(expected) or not np.isfinite(actual).all()
+                or inputs['sequence'].shape!=(len(expected),predictor.metadata['window'],27)
+                or inputs['step_mask'].shape!=(len(expected),predictor.metadata['window'])
+                or (actual>predictor.max_wait).any()):raise ValueError('Cobertura incompleta')
         error=float(np.max(abs(actual-expected)));errors.append(error);count+=len(expected)
 if max(errors)>.0001:raise ValueError('El contenedor alteró las predicciones fuera de tolerancia')
 faulthandler.cancel_dump_traceback_later()

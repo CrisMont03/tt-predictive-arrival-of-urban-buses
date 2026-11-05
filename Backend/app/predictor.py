@@ -3,6 +3,7 @@ import json
 from math import isfinite
 from pathlib import Path
 from .initial_approval import valid as initial_exception_valid
+from .manual_release import valid as manual_exception_valid
 
 from .model_inputs import INPUT_WIDTH, SCHEMA_VERSION, FEEDBACK_SCHEMA, NEXT_BUS_SCHEMA, NEXT_BUS_MAX_WAIT, SUPPORTED_SCHEMAS, contract, online_inputs, transform
 
@@ -14,7 +15,8 @@ class Predictor:
         if (self.metadata.get("schema_version") not in SUPPORTED_SCHEMAS
                 or (require_approved and (self.metadata.get("simulation")
                     or self.metadata.get("approved") is not True
-                    or (self.metadata.get("eligible") is not True and not initial_exception_valid(self.metadata))))):
+                    or (self.metadata.get("eligible") is not True and not initial_exception_valid(self.metadata)
+                        and not manual_exception_valid(self.metadata))))):
             raise ValueError("El artefacto no está validado/aprobado para producción")
         self.kind = self.metadata.get("predictor_kind", "lstm")
         self.max_wait = NEXT_BUS_MAX_WAIT if self.metadata["schema_version"] == NEXT_BUS_SCHEMA else 45

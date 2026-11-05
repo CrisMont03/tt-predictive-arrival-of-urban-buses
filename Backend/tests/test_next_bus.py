@@ -95,7 +95,7 @@ def test_future_labels_and_validation_do_not_change_training_inputs_or_fallback(
 
 def test_long_feedback_only_available_after_receipt_and_grids_never_reports():
     report=dict(uid='u',query_id='long',station_id='rio_consulado',simulation=False,wait_basis='since_query',
-        query_at='2026-11-04T12:00:00Z',received_at='2026-11-04T13:31:00Z',actual_min=90,context={})
+        query_at='2026-11-04T12:00:00Z',received_at='2026-11-04T13:31:00Z',actual_min=90,context={},prediction_target='next_bus_wait')
     accepted,excluded=confirmed_feedback([report], '2026-11-04T14:00:00Z')
     assert len(accepted)==1 and not excluded
     args=dict(schema_version=NEXT_BUS_SCHEMA,observations=[report])
@@ -140,10 +140,13 @@ def test_local_api_historical_cache_feedback_and_long_domain(tmp_path,monkeypatc
         first=query('next-bus-unit-0001');assert first.status_code==200,first.text
         value=first.json();assert value['source']=='historical' and value['waiting_time_min']>45
         assert value['prediction_target']=='next_bus_wait' and value['estimator']=='historical'
+        clock[0]+=timedelta(seconds=10)
         second=query('next-bus-unit-0002').json();assert second['source']=='cache'
+        assert second['waiting_time_min']==pytest.approx(value['waiting_time_min']-10/60)
+        assert second['estimated_arrival_at']==value['estimated_arrival_at']
         old=dict(value);old['timestamp']=timestamp(value['timestamp']);old['requested_at']=timestamp(value['requested_at']);old['expires_at']=timestamp(value['expires_at'])
         aged=reusable_prediction(old,clock[0]+timedelta(minutes=2),'rio_consulado','historical-unit',False)
-        assert aged['waiting_time_min']==pytest.approx(value['waiting_time_min']-2)
+        assert aged['waiting_time_min']==pytest.approx(value['waiting_time_min']-2-10/60)
         expired={**old,'estimated_arrival_at':clock[0]+timedelta(minutes=1),'waiting_time_min':1}
         assert reusable_prediction(expired,clock[0]+timedelta(minutes=2),'rio_consulado','historical-unit',False) is None
         clock[0]+=timedelta(minutes=120)
@@ -181,7 +184,7 @@ def test_monthly_benchmark_includes_long_confirmed_waits_but_cannot_auto_change_
             at=f'2026-11-{day:02d}T12:{i:02d}:00Z'
             reports.append(dict(uid=str(i),query_id=f'{day}-{i}',station_id='rio_consulado',query_at=at,
                 received_at=f'2026-11-{day:02d}T14:{i:02d}:00Z',actual_min=120,simulation=False,
-                wait_basis='since_query',context=calendar_context(at)))
+                wait_basis='since_query',context=calendar_context(at),prediction_target='next_bus_wait'))
     benchmark=monthly_benchmark(reports,'2026-11-03T00:00:00Z',schema_version=NEXT_BUS_SCHEMA)
     assert len(benchmark['cases'])==30 and benchmark['target_definition']=='next_bus_wait'
     new=SimpleNamespace(metadata={'target_definition':'next_bus_wait','schema_version':NEXT_BUS_SCHEMA})

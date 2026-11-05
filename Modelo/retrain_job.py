@@ -67,7 +67,7 @@ def train_real(preparation, output, run_id, *, synthetic=False, epochs=50, spec=
     quality = read_json(Path(preparation) / "quality.json")
     if quality.get("schema_version") == NEXT_BUS_SCHEMA:
         if synthetic:raise ValueError("No usar fixtures para el objetivo próximo bus")
-        from Modelo.next_bus import train_maintenance
+        from Modelo.operacion.next_bus_training import train_maintenance
         train_maintenance(preparation, output, run_id, (spec or {}).get("training", {}))
         return Predictor(output, require_approved=False)
     if quality.get("schema_version") == "arribo-sequences-feedback-v1":
@@ -239,7 +239,7 @@ def cloud_run(args):
             from Dataset.next_bus import prepare_maintenance
             return prepare_maintenance(read_rows(csv_path), inputs['feedback'], fit_cutoff,
                 benchmark_ids=[case['sample_id'] for case in benchmark['cases']],
-                continuity_confirmed=inputs['spec'].get('continuity_confirmed', False))
+                continuity_confirmed=inputs['spec'].get('continuity_confirmed', False),window=inputs['spec']['window'])
         return prepare_mixed(read_rows(csv_path), inputs["feedback"], fit_cutoff,
                              window=inputs["spec"]["window"], manifest=manifest,
                              benchmark_ids=[case["sample_id"] for case in benchmark["cases"]],

@@ -10,7 +10,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT/'Backend')]
-from app.model_inputs import calendar_context, timestamp, LOCAL_ZONE, NEXT_BUS_MAX_WAIT
+from app.model_inputs import calendar_context, timestamp, LOCAL_ZONE, NEXT_BUS_MAX_WAIT, is_synthetic_source
 
 
 def sha(path):
@@ -128,7 +128,7 @@ def confirmed_feedback(reports, cutoff, held_ids=()):
     result=[];excluded=Counter();seen=set();held=set(held_ids)
     for r in reports:
         try:
-            if r.get('simulation') is not False or r.get('source')=='synthetic' or r.get('is_synthetic') or r.get('wait_basis')!='since_query':
+            if r.get('simulation') is not False or is_synthetic_source(r) or r.get('wait_basis')!='since_query' or r.get('prediction_target')!='next_bus_wait':
                 excluded['unconfirmed_or_simulated']+=1;continue
             at=timestamp(r['query_at']);received=timestamp(r['received_at']);wait=float(r['actual_min'])
             uid,qid=r['uid'],r['query_id'];identity='feedback-'+hashlib.sha256(json.dumps([uid,qid],sort_keys=True).encode()).hexdigest()
@@ -144,7 +144,7 @@ def confirmed_feedback(reports, cutoff, held_ids=()):
     return result,dict(excluded)
 
 
-def prepare_maintenance(camera_rows,feedback,cutoff,*,benchmark_ids=(),continuity_confirmed=False):
+def prepare_maintenance(camera_rows,feedback,cutoff,*,benchmark_ids=(),continuity_confirmed=False,window=30):
     """Historical complete intervals plus confirmed feedback; never infer missing buses from reports."""
     if not continuity_confirmed:
         raise ValueError('El nuevo objetivo requiere confirmar continuidad del histórico')
@@ -152,6 +152,8 @@ def prepare_maintenance(camera_rows,feedback,cutoff,*,benchmark_ids=(),continuit
     for r in camera_rows:
         arrival=timestamp(r['bus_arrival']);start=timestamp(r['arrival_user'])
         if arrival>=cutoff:continue
+        if r.get('simulation') or is_synthetic_source(r):
+            raise ValueError('Histórico mensual sintético no permitido')
         day=day_of(arrival)
         events[(day,arrival.isoformat())]=dict(day=day,arrival_at=arrival.isoformat(),sources=[],sentinel_rows=int(r['record_type']=='bus_only'))
         at=start.astimezone(LOCAL_ZONE)
@@ -180,7 +182,7 @@ def prepare_maintenance(camera_rows,feedback,cutoff,*,benchmark_ids=(),continuit
             proxies.append({**r,'day':day_of(r['query_at']),'source':'feedback'})
     # Receipts from a different partition never enter the earlier partition's histories.
     filtered.sort(key=lambda r:(r['event_at'],r['sample_id']))
-    quality=dict(schema_version='arribo-next-bus-feedback-v1',window=10,can_train=all(any(r['split']==s for r in filtered) for s in ('train','validation')),
+    quality=dict(schema_version='arribo-next-bus-feedback-v1',window=window,can_train=all(any(r['split']==s for r in filtered) for s in ('train','validation')),
         simulation=False,continuity=coverage,next_bus_reports=proxies,exclusions={**exclusions,**proxy_exclusions},
         evaluation_policy='Monthly benchmark excluded from fit/calibration; original fixed holdouts must remain excluded in history source')
     return filtered,quality

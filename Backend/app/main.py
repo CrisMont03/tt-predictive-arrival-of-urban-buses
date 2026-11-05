@@ -121,7 +121,11 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
                             else select_observations(raw_reports, now, body.station_id, predictor.metadata.get("window", 10)))
         context = Context(hour=local.hour, day_of_week=local.weekday(), is_weekend=int(local.weekday() >= 5), is_holiday=int(local.date() in holidays.Mexico(years=local.year)), **external)
         window = 10 if mode == "demo" else predictor.metadata.get("window", 10)
-        prepared = online_inputs(context.model_dump(), window, now=now, station_id=body.station_id,
+        # The next-bus dataset uses minute queries. A shared minute anchor lets
+        # equivalent requests reuse cache while responses age to their exact query time.
+        inference_at = (now.replace(second=0, microsecond=0)
+                        if mode != "demo" and predictor.metadata.get('schema_version') == NEXT_BUS_SCHEMA else now)
+        prepared = online_inputs(context.model_dump(), window, now=inference_at, station_id=body.station_id,
                                  observations=observations,
                                  fallback=None if mode == "demo" else predictor.metadata.get("fallback"),
                                  schema_version="arribo-sequences-v2" if mode == "demo" else predictor.metadata.get("schema_version", "arribo-sequences-v2"))
@@ -133,7 +137,11 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
             value = {**cached, "source": "cache", "query_id": body.request_id}
         else:
             wait, interval = (12.3, (8, 17)) if mode == "demo" else (predictor.predict_prepared(prepared) if hasattr(predictor, "predict_prepared") else predictor.predict(
-                context.model_dump(), observations, now=now, station_id=body.station_id))
+                context.model_dump(), observations, now=inference_at, station_id=body.station_id))
+            if inference_at != now:
+                elapsed = (now-inference_at).total_seconds()/60
+                wait=max(0,wait-elapsed)
+                interval=tuple(max(0,v-elapsed) for v in interval)
             generated_at = clock()
             expires_at = cache_expiration(generated_at, context_sources)
             if expires_at <= generated_at:

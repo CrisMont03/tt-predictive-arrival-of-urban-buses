@@ -13,6 +13,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "Backend")]
 from app.artifacts import digest, download_package, immutable_json, json_bytes, publish_package, read_json
 from app.predictor import Predictor
 from app.initial_approval import issue as issue_exception, evaluation as exception_evaluation
+from app.manual_release import issue as issue_manual, evaluation as manual_evaluation, valid as valid_manual
 from Modelo.operacion.evaluation import compare
 from Modelo.operacion.promotion import CloudRunDriver, promote, rollback
 from Modelo.operacion.registry import GCSRegistry
@@ -30,6 +31,9 @@ def main():
     parser.add_argument("--confirm-dev-project")
     parser.add_argument("--run-id")
     parser.add_argument("--manual-initial", action="store_true")
+    parser.add_argument("--manual-release", action="store_true", help="Sustitución explícita del único candidato autorizado")
+    parser.add_argument('--authorization',type=Path,help='Metadatos de la copia local ya autorizada y revisada')
+    parser.add_argument('--stage-only',action='store_true',help='Publicar revisión sin tráfico para pruebas autenticadas')
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--register-only", action="store_true", help="Registrar candidato inicial local; no desplegar")
     parser.add_argument("--candidate", type=Path)
@@ -56,7 +60,7 @@ def main():
     client = storage.Client(project="arribo-68326", credentials=credentials)
     registry = GCSRegistry(os.environ["ARRIBO_REGISTRY_URI"], client=client)
     if args.register_only:
-        if not args.run_id or not args.candidate or (not args.benchmark and not args.initial_exception):
+        if not args.run_id or not args.candidate or (not args.benchmark and not args.initial_exception and not args.manual_release):
             parser.error("Registrar exige --run-id, --candidate y --benchmark")
         import re
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,60}", args.run_id):
@@ -75,7 +79,25 @@ def main():
             path, _ = download_package(ref["uri"], ref["generation"], ref["sha256"], client=client)
             incumbent = Predictor(path)
         directory = args.candidate
-        if args.initial_exception:
+        if args.manual_release:
+            if not current or not args.approval_operator or not args.approval_reason or not args.preparation:
+                parser.error('La sustitución exige vigente, operador, motivo y preparación')
+            preparation = read_json(args.preparation / 'preparation.json')
+            if digest((args.preparation / 'preparation.json').read_bytes()) != candidate.metadata['preparation_sha256']:
+                parser.error('Preparación incompatible')
+            if args.authorization:
+                approved_metadata=read_json(args.authorization)
+                grant=approved_metadata.get('manual_release_exception',{})
+                original={k:v for k,v in approved_metadata.items() if k!='manual_release_exception'}
+                original['approved']=False
+                if (not valid_manual(approved_metadata) or original!=candidate.metadata or grant['previous']!=current
+                        or grant['original_metadata_sha256']!=digest((args.candidate/'metadata.json').read_bytes())):
+                    parser.error('La copia autorizada no corresponde al candidato y vigente')
+            else:
+                grant = issue_manual(candidate.metadata, operator=args.approval_operator, reason=args.approval_reason,
+                                     source_sha256=digest((args.candidate/'metadata.json').read_bytes()), previous=current)
+            evaluation = manual_evaluation(candidate.metadata, grant, incumbent.metadata['model_version'])
+        elif args.initial_exception:
             if current or not args.approval_operator or not args.approval_reason or not args.preparation:
                 parser.error("Excepción solo inicial: requiere operador, motivo y preparación")
             preparation = read_json(args.preparation / "preparation.json")
@@ -127,7 +149,8 @@ def main():
         if deployment and deployment.get("status") == "switching":
             result = promote(registry, driver, current["package"], record["evaluation"],
                              expected_incumbent=record["evaluation"]["incumbent_version"],
-                             model_version=current["model_version"], manual_initial=args.manual_initial, enabled=True)
+                             model_version=current["model_version"], manual_initial=args.manual_initial,
+                             manual_release=args.manual_release, enabled=True)
             print(json.dumps({"status": result["status"]}))
             return
         print(json.dumps({"status": "already_active"}))
@@ -141,13 +164,20 @@ def main():
         path, _ = download_package(old["uri"], old["generation"], old["sha256"], client=client)
         incumbent = Predictor(path)
     # Recompute with the actual current model, not just a stale report supplied by training.
-    if record["evaluation"].get("initial_release_exception"):
+    if record['evaluation'].get('manual_release_exception'):
+        if not incumbent or not args.manual_release:
+            parser.error('Esta autorización solo admite publicación manual con vigente')
+        grant=record['evaluation']['manual_release_exception']
+        if current != grant['previous']:
+            parser.error('La revisión vigente cambió desde la autorización')
+        evaluation=manual_evaluation(candidate.metadata, grant, incumbent.metadata['model_version'])
+    elif record["evaluation"].get("initial_release_exception"):
         if incumbent or not args.manual_initial:
             parser.error("La excepción exige primera publicación manual, sin vigente")
         evaluation = exception_evaluation(candidate.metadata, record["evaluation"]["initial_release_exception"])
     else:
         evaluation = compare(record["evaluation"]["benchmark"], candidate, incumbent)
-    if not evaluation["publishable"] and not (args.manual_initial and evaluation["decision"] == "manual_initial_approval"):
+    if not evaluation["publishable"] and not (args.manual_initial and evaluation["decision"] == "manual_initial_approval") and not (args.manual_release and evaluation['decision']=='manual_replacement_approval'):
         print(json.dumps({"status": "kept", "decision": evaluation["decision"]}))
         return
     approved = Path(tempfile.mkdtemp(prefix="arribo-approved-"))
@@ -156,14 +186,27 @@ def main():
     if evaluation.get("initial_release_exception"):
         metadata.pop("approval_evaluation_sha256")
         metadata["initial_release_exception"] = evaluation["initial_release_exception"]
+    if evaluation.get('manual_release_exception'):
+        metadata.pop('approval_evaluation_sha256')
+        metadata['manual_release_exception']=evaluation['manual_release_exception']
     immutable_json(approved / "metadata.json", metadata)
     release = release_identifier(candidate.metadata["model_version"])
     # Loading the approved copy validates Keras and the unchanged weights before upload.
     Predictor(approved)
     package = publish_package(approved, os.environ["ARRIBO_RELEASES_URI"], release, client=client)
+    if args.stage_only:
+        before=driver.traffic()
+        deployment=driver.deploy(package,release)
+        if (not driver.ready(deployment,{'release_id':release,'model_version':candidate.metadata['model_version']})
+                or driver.traffic()!=before):
+            raise ValueError('La revisión de prueba no está lista o cambió el tráfico')
+        print(json.dumps(dict(status='staged_no_traffic',deployment=deployment,package=package,
+                             model_version=candidate.metadata['model_version'])))
+        return
     result = promote(registry, driver, package, evaluation,
                      expected_incumbent=incumbent.metadata["model_version"] if incumbent else None,
-                     model_version=candidate.metadata["model_version"], manual_initial=args.manual_initial, enabled=True)
+                     model_version=candidate.metadata["model_version"], manual_initial=args.manual_initial,
+                     manual_release=args.manual_release, enabled=True)
     print(json.dumps({"status": result["status"], "model_version": result["model_version"]}))
 
 
