@@ -297,10 +297,12 @@ def test_real_comparison_requires_strict_improvement_on_same_raw_cases(value, de
     benchmark = dict(format="arribo-benchmark-v1", purpose="monthly", simulation=False, cases=[
         dict(sample_id="heldout", simulation=False, station_id="rio_consulado", query_at="2026-10-20T00:00:00Z",
              target=12, context=report()["context"], observations=[report()])])
+    template = benchmark["cases"][0]
+    benchmark["cases"] = [{**template, "sample_id": f"held-{i}", "query_at": f"2026-10-{12+i%2:02d}T12:00:00Z"} for i in range(30)]
     result = compare(benchmark, candidate, incumbent)
     assert result["decision"] == decision and result["publishable"] == publishable
-    assert calls[0][1:] == calls[2][1:] and calls[1][1:] == calls[3][1:]
-    candidate.metadata["training_sample_ids"] = ["heldout"]
+    assert calls[0][1:] == calls[60][1:] and calls[1][1:] == calls[61][1:]
+    candidate.metadata["training_sample_ids"] = ["held-0"]
     with pytest.raises(ValueError, match="utilizado"):
         compare(benchmark, candidate, incumbent)
 

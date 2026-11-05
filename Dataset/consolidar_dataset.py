@@ -37,6 +37,7 @@ import argparse
 import csv
 import sqlite3
 import math
+import hashlib
 from datetime import datetime, date
 from pathlib import Path
 import sys
@@ -70,6 +71,8 @@ STATION_ID    = "rio_consulado"
 CAMERA_ID     = "rio_consulado_cctv_1"
 SELECTED_DATES = None
 WEATHER_CACHE = None
+INCLUDE_GENERATED = False
+SYNTHETIC_DATES = set()
 
 # Coordenadas de la estación Río Consulado – Misterios (CDMX)
 ESTACION_LAT  = 19.4624
@@ -125,6 +128,11 @@ def conectar_db() -> sqlite3.Connection:
 def inicializar_db(conn: sqlite3.Connection) -> None:
     conn.execute(SQL_CREAR_TABLA_BASE)
     conn.execute(SQL_CREAR_TABLA_ENRIQUECIDA)
+    conn.execute("""CREATE TABLE IF NOT EXISTS eventos_procedencia (
+        id INTEGER PRIMARY KEY REFERENCES eventos_espera(id),
+        source_file TEXT NOT NULL, source_line INTEGER NOT NULL,
+        source_sha256 TEXT NOT NULL, is_synthetic INTEGER NOT NULL CHECK(is_synthetic IN (0,1))
+    )""")
     # Do not remove old duplicates silently; a conflicting database needs review.
     conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS eventos_origen_unique
         ON eventos_espera(video_source, arrival_user, bus_arrival, track_id_persona)""")
@@ -153,6 +161,9 @@ def daily_csvs(root, dates=None):
             continue
         for folder in ("dataset", "datasets"):
             found.extend((day / folder).glob("*_v4_dataset.csv"))
+            if INCLUDE_GENERATED:
+                found.extend(p for p in (day / folder).glob("*_dataset.csv")
+                             if not p.name.endswith("_v4_dataset.csv"))
     return sorted(found)
 
 
@@ -225,21 +236,31 @@ def cmd_consolidar() -> None:
         insertados = 0
         omitidos   = 0
 
-        for fila in filas:
+        source_sha = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+        is_synthetic = csv_path.parent.parent.name.replace("_", "-") in SYNTHETIC_DATES
+        if INCLUDE_GENERATED and not csv_path.name.endswith("_v4_dataset.csv") and not is_synthetic:
+            raise ValueError(f"CSV generado sin fecha sintética declarada: {csv_path}")
+        for line, fila in enumerate(filas, 2):
             # Verificar si ya existe para evitar duplicados al re-ejecutar
             existe = conn.execute(
                 """
-                SELECT 1 FROM eventos_espera
+                SELECT id FROM eventos_espera
                 WHERE video_source = ? AND arrival_user = ? AND bus_arrival = ? AND track_id_persona = ?
                 """,
                 (video_source, fila["arrival_user"], fila["bus_arrival"], fila["track_id_persona"]),
             ).fetchone()
 
             if existe:
+                event_id = existe[0]
+                previous = conn.execute("SELECT source_sha256,is_synthetic FROM eventos_procedencia WHERE id=?", (event_id,)).fetchone()
+                if previous and (previous[0] != source_sha or previous[1] != int(is_synthetic)):
+                    raise ValueError(f"Origen modificado; usa una base nueva: {csv_path}")
+                conn.execute("INSERT OR IGNORE INTO eventos_procedencia VALUES(?,?,?,?,?)",
+                             (event_id, str(csv_path.resolve()), line, source_sha, int(is_synthetic)))
                 omitidos += 1
                 continue
 
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO eventos_espera
                     (video_source, track_id_persona, arrival_user, bus_arrival,
@@ -259,6 +280,15 @@ def cmd_consolidar() -> None:
                     1 if str(fila["is_weekend"]).lower() in ("true", "1") else 0,
                 ),
             )
+            conn.execute("INSERT INTO eventos_procedencia VALUES(?,?,?,?,?)",
+                         (cursor.lastrowid, str(csv_path.resolve()), line, source_sha, int(is_synthetic)))
+            if any(fila.get(k) not in (None, "") for k in ("precipitation_mm", "temp_c", "humidity")):
+                climate = [float(fila[k]) if fila.get(k) not in (None, "") else None
+                           for k in ("precipitation_mm", "temp_c", "humidity")]
+                if any(v is not None and not math.isfinite(v) for v in climate):
+                    raise ValueError(f"Clima no finito: {csv_path}:{line}")
+                conn.execute("INSERT INTO eventos_enriquecidos VALUES(?,?,?,?,?)",
+                             (cursor.lastrowid, *climate, es_dia_festivo_mx(fila['date'])))
             insertados += 1
 
         conn.commit()
@@ -495,9 +525,13 @@ def cmd_exportar() -> None:
         raise FileNotFoundError(f"No existe la base seleccionada: {DB_PATH}")
     conn = sqlite3.connect(f"{DB_PATH.resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    has_provenance = conn.execute("SELECT 1 FROM sqlite_master WHERE name='eventos_procedencia' AND type='table'").fetchone()
+    provenance_columns = ("p.is_synthetic, p.source_file, p.source_line, p.source_sha256"
+                          if has_provenance else "NULL AS is_synthetic, NULL AS source_file, NULL AS source_line, NULL AS source_sha256")
+    provenance_join = "LEFT JOIN eventos_procedencia p ON e.id=p.id" if has_provenance else ""
 
     filas = conn.execute(
-        """
+        f"""
         SELECT
             e.waiting_time_min,
             e.waiting_time_seg,
@@ -514,9 +548,11 @@ def cmd_exportar() -> None:
             e.track_id_persona,
             e.video_source,
             CASE WHEN e.track_id_persona = -1 THEN 'bus_only' ELSE 'user_wait' END AS record_type,
-            CASE WHEN e.track_id_persona >= 0 THEN 1 ELSE 0 END AS wait_observed
+            CASE WHEN e.track_id_persona >= 0 THEN 1 ELSE 0 END AS wait_observed,
+            {provenance_columns}
         FROM eventos_espera e
         LEFT JOIN eventos_enriquecidos ee ON e.id = ee.id
+        {provenance_join}
         ORDER BY e.arrival_user
         """
     ).fetchall()
@@ -532,6 +568,7 @@ def cmd_exportar() -> None:
         "is_holiday", "precipitation_mm", "temp_c", "humidity",
         "track_id_persona", "video_source", "record_type", "wait_observed",
         "station_id", "camera_id",
+        "is_synthetic", "source", "source_file", "source_line", "source_sha256",
     ]
 
     CSV_FINAL.parent.mkdir(parents=True, exist_ok=True)
@@ -540,7 +577,9 @@ def cmd_exportar() -> None:
         writer.writerow(COLS_EXPORT)
         for row in filas:
             values = dict(row)
-            values.update(station_id=STATION_ID, camera_id=CAMERA_ID)
+            synthetic = values['is_synthetic']
+            values.update(station_id=STATION_ID, camera_id=None if synthetic == 1 else CAMERA_ID,
+                          source='synthetic' if synthetic == 1 else 'camera' if synthetic == 0 else 'unknown')
             writer.writerow([values[c] for c in COLS_EXPORT])
 
     total       = len(filas)
@@ -561,7 +600,7 @@ def cmd_exportar() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global DB_PATH, CSV_FINAL, RESULTADOS, STATION_ID, CAMERA_ID, SELECTED_DATES, WEATHER_CACHE
+    global DB_PATH, CSV_FINAL, RESULTADOS, STATION_ID, CAMERA_ID, SELECTED_DATES, WEATHER_CACHE, INCLUDE_GENERATED, SYNTHETIC_DATES
     p = argparse.ArgumentParser(
         description="TT 2026-B050 | Consolidación y enriquecimiento del dataset"
     )
@@ -573,6 +612,8 @@ def main() -> None:
     p.add_argument("--camera-id", default=CAMERA_ID)
     p.add_argument("--dates", action="append", help="Fecha ISO autorizada; repetir --dates para añadir fechas")
     p.add_argument("--weather-cache", type=Path, help="Respuestas históricas para reproducir el enriquecimiento")
+    p.add_argument("--include-generated", action="store_true", help="Admitir también CSV *_dataset.csv; exige declarar sus fechas sintéticas")
+    p.add_argument("--synthetic-dates", action="append", default=[], help="Fecha ISO sintética; repetir por cada jornada generada")
 
     sub.add_parser(
         "consolidar",
@@ -594,6 +635,7 @@ def main() -> None:
     DB_PATH, CSV_FINAL, RESULTADOS = args.db, args.csv_final, args.resultados
     STATION_ID, CAMERA_ID = args.station_id, args.camera_id
     SELECTED_DATES, WEATHER_CACHE = args.dates, args.weather_cache
+    INCLUDE_GENERATED, SYNTHETIC_DATES = args.include_generated, set(args.synthetic_dates)
 
     if args.comando == "consolidar":
         cmd_consolidar()

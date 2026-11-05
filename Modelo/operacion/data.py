@@ -117,6 +117,7 @@ def prepare_mixed(camera_rows, feedback, cutoff, *, window=10, manifest=None, be
             position += 1
         fallback = {} if row["boundary_excluded"] else prefix.table if row["split"] == "train" else frozen.table
         group = tuple(row["continuity_group"])
+        row["coverage_start"] = starts[group].isoformat()
         common = dict(now=now, station_id=row["station_id"], fallback=fallback, start_at=starts[group],
                       observations=histories[group])
         if schema_version == FEEDBACK_SCHEMA:

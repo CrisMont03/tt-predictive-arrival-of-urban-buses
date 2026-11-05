@@ -16,9 +16,9 @@ export function distanceMeters(latitude: number, longitude: number, targetLat: n
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
 }
 
-export function parseMinutes(input: string): number | null {
+export function parseMinutes(input: string, maximum = 180): number | null {
   const normalized = input.trim().replace(',', '.');
   if (!/^\d+(\.\d{1,2})?$/.test(normalized)) return null;
   const value = Number(normalized);
-  return Number.isFinite(value) && value >= 0 && value <= 180 ? value : null;
+  return Number.isFinite(value) && value >= 0 && value <= maximum ? value : null;
 }

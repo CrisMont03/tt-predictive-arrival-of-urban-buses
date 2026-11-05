@@ -9,12 +9,12 @@ POLICY = 'feedback-derived-arrivals-v1'
 GROUP_SECONDS = 60
 
 
-def arrival_fields(query_at, actual_min, received_at, wait_basis='unspecified', *, simulation=False):
+def arrival_fields(query_at, actual_min, received_at, wait_basis='unspecified', *, simulation=False, max_wait=MAX_WAIT):
     result = dict(wait_basis=wait_basis, derived_bus_arrival_at=None,
                   arrival_eligible=False, arrival_policy=POLICY)
     if wait_basis != 'since_query':
         return {**result, 'arrival_exclusion': 'unspecified_wait_start'}
-    if simulation or not 0 <= actual_min <= MAX_WAIT:
+    if simulation or not 0 <= actual_min <= max_wait:
         return {**result, 'arrival_exclusion': 'simulation_or_domain'}
     arrival = timestamp(query_at) + timedelta(minutes=actual_min)
     if arrival > timestamp(received_at):
@@ -23,7 +23,7 @@ def arrival_fields(query_at, actual_min, received_at, wait_basis='unspecified', 
             'arrival_exclusion': None}
 
 
-def grouped_arrivals(reports, at, station_id, *, start_at=None, allow_offline_synthetic=False):
+def grouped_arrivals(reports, at, station_id, *, start_at=None, allow_offline_synthetic=False, max_wait=MAX_WAIT):
     """Recompute each snapshot: late evidence cannot rewrite earlier snapshots."""
     at = timestamp(at)
     lower = at - timedelta(hours=2)
@@ -39,7 +39,7 @@ def grouped_arrivals(reports, at, station_id, *, start_at=None, allow_offline_sy
             actual = finite(r['actual_min'])
             if actual is None or not query <= received < at:
                 continue
-            fields = arrival_fields(query, actual, received, r.get('wait_basis', 'unspecified'))
+            fields = arrival_fields(query, actual, received, r.get('wait_basis', 'unspecified'), max_wait=max_wait)
             if not fields['arrival_eligible']:
                 continue
             arrival = fields['derived_bus_arrival_at']
@@ -75,7 +75,7 @@ def grouped_arrivals(reports, at, station_id, *, start_at=None, allow_offline_sy
     return result
 
 
-def apply_arrival_context(inputs, reports, now, station_id, *, start_at=None, allow_offline_synthetic=False):
+def apply_arrival_context(inputs, reports, now, station_id, *, start_at=None, allow_offline_synthetic=False, max_wait=MAX_WAIT):
     from .model_inputs import bus_context_at
     evidence = []
     for i, step in enumerate(inputs['provenance']):
@@ -85,7 +85,7 @@ def apply_arrival_context(inputs, reports, now, station_id, *, start_at=None, al
         # No reports received after the prediction cutoff, even when constructing historic steps.
         cutoff_reports = [r for r in reports or [] if _before(r, now)]
         groups = grouped_arrivals(cutoff_reports, at, station_id, start_at=start_at,
-                                  allow_offline_synthetic=allow_offline_synthetic)
+                                  allow_offline_synthetic=allow_offline_synthetic, max_wait=max_wait)
         values = bus_context_at([g['arrival_at'] for g in groups], at)
         inputs['bus_context'][i] = [v if v is not None else 0 for v in values]
         inputs['bus_mask'][i] = [int(v is not None) for v in values]

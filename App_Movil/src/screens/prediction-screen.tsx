@@ -15,9 +15,15 @@ export default function PredictionScreen() {
   const { predict, dataReady, preferences, selectedStation, selectStation, mode } = useArribo(); const p = usePalette();
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [far, setFar] = useState(false);
+  const [slowRequest, setSlowRequest] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const locked = useRef(false); const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setTimeout(() => setSlowRequest(true), 9000);
+    return () => clearTimeout(timer);
+  }, [busy]);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer); }, []);
   useEffect(() => {
     let alive = true;
@@ -29,17 +35,18 @@ export default function PredictionScreen() {
   async function consult() {
     if (locked.current) return;
     locked.current = true;
-    setBusy(true); setError(null);
+    setSlowRequest(false); setBusy(true); setError(null);
     try { const result = await predict(); if (alive.current) setPrediction(result); } catch (failure) { if (alive.current && !(failure instanceof StaleStationPrediction)) setError(failure instanceof Error ? failure.message : 'No se pudo consultar.'); } finally { locked.current = false; if (alive.current) setBusy(false); }
   }
   return <Page title="¿Cuánto falta?" subtitle="Una estimación para organizar tu espera.">
     <StationSelector station={selectedStation} mode={mode} onSelect={selectStation} disabled={!dataReady} />
     {far && preferences.gps_enabled && <Notice>Parece que estás lejos de la parada. La estimación aplica para {selectedStation.name}.</Notice>}{error && <Notice error>{error}</Notice>}
-    {!dataReady && <Loading title="Preparando tu sesión…" />}{busy && <Loading title="Obteniendo una estimación. Puede tardar unos segundos…" />}
+    {!dataReady && <Loading title="Preparando tu sesión…" />}{busy && <Loading title={slowRequest ? 'El servicio está tardando. Puede estar iniciándose; mantén la app abierta mientras esperamos la respuesta…' : 'Obteniendo una estimación. Puede tardar unos segundos…'} />}
     {prediction ? <Card>
       {prediction.simulation && <Notice>Datos de demostración · Este resultado es un ejemplo.</Notice>}
       <View style={styles.between}><Label muted>Tiempo estimado de espera</Label><Badge tone={Date.parse(prediction.expires_at) <= now ? 'warning' : 'blue'}>{Date.parse(prediction.expires_at) <= now ? 'Vencida' : 'Estimación vigente'}</Badge></View><View style={styles.metricRow}><Label style={[styles.value, { color: p.blue }]}>{Math.round(prediction.waiting_time_min)}</Label><Label muted>minutos</Label></View>
-      <Label>Entre {Math.round(prediction.confidence_interval[0])} y {Math.round(prediction.confidence_interval[1])} minutos</Label><Label muted style={{ fontSize: 13 }}>Generada: {formatDate(prediction.timestamp)}</Label><Label muted style={{ fontSize: 13 }}>Fuente: {prediction.source === 'mock' ? 'Demostración' : prediction.source === 'cache' ? 'Caché' : 'Modelo predictivo'} · {prediction.model_version}</Label>
+      <Label>Entre {Math.round(prediction.confidence_interval[0])} y {Math.round(prediction.confidence_interval[1])} minutos</Label><Label muted style={{ fontSize: 13 }}>Generada: {formatDate(prediction.timestamp)}</Label><Label muted style={{ fontSize: 13 }}>Fuente: {prediction.source === 'mock' ? 'Demostración' : prediction.source === 'cache' ? (prediction.estimator === 'historical' ? 'Caché · Estimación histórica' : 'Caché') : prediction.source === 'historical' ? 'Estimación histórica' : 'Modelo predictivo'} · {prediction.model_version}</Label>
+      {prediction.prediction_target === 'next_bus_wait' && prediction.estimated_arrival_at && <Label muted>Llegada estimada: {formatDate(prediction.estimated_arrival_at)} · Horario aproximado</Label>}
       {Date.parse(prediction.expires_at) <= now && <Notice>Esta estimación ha vencido. Consulta de nuevo para actualizarla.</Notice>}
       <View style={styles.row}><Ionicons name={prediction.context.precipitation_mm ? 'rainy-outline' : 'partly-sunny-outline'} color={p.blue} size={22} /><Label>{prediction.context.temp_c === null ? 'Clima no disponible' : `${prediction.context.temp_c} °C`}</Label></View>
       {prediction.context.traffic_density !== null && prediction.context.traffic_density < 0.5 && <Notice>Tráfico lento en la zona.</Notice>}{prediction.context.env_alert_active === 1 && <Notice>Hay una alerta ambiental activa. Consulta Alertas.</Notice>}

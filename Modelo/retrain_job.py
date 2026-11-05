@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "Backend")]
 from app.artifacts import digest, download_package, gcs_parts, immutable_json, json_bytes, publish_package, read_json
-from app.model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS, select_observations, timestamp
+from app.model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS, NEXT_BUS_SCHEMA, select_observations, timestamp
 from app.predictor import Predictor
 from Dataset.preparar_modelo import read_rows, read_manifest
 from Modelo.operacion.data import feedback_rows, prepare_mixed
@@ -36,12 +36,16 @@ def pinned_object(reference, client, *, limit=100_000_000):
     return data
 
 
-def monthly_benchmark(reports, cutoff, *, minimum=30):
-    rows, _ = feedback_rows(reports, cutoff)
+def monthly_benchmark(reports, cutoff, *, minimum=30, schema_version=SCHEMA_VERSION):
+    if schema_version == NEXT_BUS_SCHEMA:
+        from Dataset.next_bus import confirmed_feedback
+        rows, _ = confirmed_feedback(reports, cutoff)
+    else:
+        rows, _ = feedback_rows(reports, cutoff)
     days = sorted({timestamp(row["event_at"]).astimezone(ZoneInfo("America/Mexico_City")).date() for row in rows})
     if len(days) < 2:
         raise ValueError("Benchmark insuficiente: faltan jornadas independientes de feedback")
-    tail = set(days[max(1, int(len(days) * .8)):])
+    tail = set(days[-max(2, (len(days) + 4) // 5):])
     selected = [row for row in rows if timestamp(row["event_at"]).astimezone(ZoneInfo("America/Mexico_City")).date() in tail]
     if len(selected) < minimum:
         raise ValueError("Benchmark insuficiente: faltan observaciones recientes")
@@ -53,15 +57,26 @@ def monthly_benchmark(reports, cutoff, *, minimum=30):
         cases.append(dict(sample_id=row["sample_id"], station_id=row["station_id"], query_at=row["event_at"],
                           context=row["context"], target=row["target"], simulation=False,
                           observations=observations))
-    return dict(format="arribo-benchmark-v1", purpose="monthly", simulation=False, cases=cases)
+    return dict(format="arribo-benchmark-v1", purpose="monthly", simulation=False, cases=cases,
+                target_definition="next_bus_wait" if schema_version == NEXT_BUS_SCHEMA else "personal_wait")
 
 
-def train_real(preparation, output, run_id, *, synthetic=False, epochs=50):
+def train_real(preparation, output, run_id, *, synthetic=False, epochs=50, spec=None):
     command = [sys.executable, str(ROOT / "Modelo" / "entrenar.py"), "--data", str(preparation),
                "--output", str(output), "--version", run_id, "--epochs", str(epochs)]
     quality = read_json(Path(preparation) / "quality.json")
+    if quality.get("schema_version") == NEXT_BUS_SCHEMA:
+        if synthetic:raise ValueError("No usar fixtures para el objetivo próximo bus")
+        from Modelo.next_bus import train_maintenance
+        train_maintenance(preparation, output, run_id, (spec or {}).get("training", {}))
+        return Predictor(output, require_approved=False)
     if quality.get("schema_version") == "arribo-sequences-feedback-v1":
-        command.extend(["--model", "lstm", "--units", "16", "--seed", "2026050"])
+        if synthetic:
+            raise ValueError("No usar la receta operativa para fixtures")
+        from Modelo.operacion.training import validate_spec
+        config = validate_spec((spec or {}).get("training", {}))
+        command = [sys.executable, str(ROOT / "Modelo/operacion/training.py"), "--data", str(preparation),
+                   "--output", str(output), "--version", run_id, "--spec-json", json.dumps(config)]
     if synthetic:
         command.append("--synthetic")
     subprocess.run(command, check=True)
@@ -177,6 +192,13 @@ def cloud_run(args):
     period = args.period or now.strftime("%Y-%m")
     cutoff = timestamp(period + "-01T00:00:00-06:00")
     run_id = "monthly-" + period + "-" + digest(json_bytes(spec_ref))[:12]
+    if getattr(args, "cutoff", None):
+        if args.period:
+            raise ValueError("Elige periodo mensual o corte manual, no ambos")
+        cutoff = timestamp(args.cutoff)
+        run_id = "manual-" + digest(json_bytes(cutoff.isoformat()))[:16] + "-" + digest(json_bytes(spec_ref))[:12]
+    if cutoff > now:
+        raise ValueError("El corte no puede estar en el futuro")
     frozen, _ = registry.read("snapshots/" + run_id)
     root = Path(tempfile.mkdtemp(prefix="arribo-retrain-"))
     if frozen is None:
@@ -208,18 +230,23 @@ def cloud_run(args):
         if inputs["spec"].get("benchmark"):
             benchmark = json.loads(pinned_object(inputs["spec"]["benchmark"], client))
         else:
-            benchmark = monthly_benchmark(inputs["feedback"], inputs["cutoff"], minimum=inputs["spec"].get("minimum_benchmark", 30))
+            benchmark = monthly_benchmark(inputs["feedback"], inputs["cutoff"], minimum=inputs["spec"].get("minimum_benchmark", 30), schema_version=inputs["spec"]["schema_version"])
         benchmark_box["value"] = benchmark
         # Strictly before benchmark queries, including calibration labels: no future fitting.
         fit_cutoff = min(timestamp(case["query_at"]) for case in benchmark["cases"])
         fit_cutoff = min(fit_cutoff, timestamp(inputs["cutoff"]))
+        if inputs['spec']['schema_version'] == NEXT_BUS_SCHEMA:
+            from Dataset.next_bus import prepare_maintenance
+            return prepare_maintenance(read_rows(csv_path), inputs['feedback'], fit_cutoff,
+                benchmark_ids=[case['sample_id'] for case in benchmark['cases']],
+                continuity_confirmed=inputs['spec'].get('continuity_confirmed', False))
         return prepare_mixed(read_rows(csv_path), inputs["feedback"], fit_cutoff,
-                             window=inputs["spec"].get("window", 20 if inputs["spec"]["schema_version"] == "arribo-sequences-feedback-v1" else 10), manifest=manifest,
+                             window=inputs["spec"]["window"], manifest=manifest,
                              benchmark_ids=[case["sample_id"] for case in benchmark["cases"]],
                              schema_version=inputs["spec"]["schema_version"])
 
     result = cycle(registry, root, run_id=run_id, inputs=frozen, prepare=prepare,
-                 train=lambda data, output, version: train_real(data, output, version, epochs=spec.get("epochs", 50)),
+                 train=lambda data, output, version: train_real(data, output, version, epochs=spec.get("epochs", 50), spec=spec),
                  evaluate=lambda candidate: compare(benchmark_box["value"], candidate, incumbent),
                  upload=lambda output, version: publish_package(output, os.environ["ARRIBO_CANDIDATES_URI"], version, client=client))
     if result["status"] == "evaluated" and os.getenv("ARRIBO_PROMOTOR_JOB"):
@@ -241,6 +268,7 @@ def main():
     parser.add_argument("--project", default="arribo-68326")
     parser.add_argument("--confirm-dev-project")
     parser.add_argument("--period", help="YYYY-MM; reintentos conservan snapshot")
+    parser.add_argument("--cutoff", help="Corte ISO para una ejecución manual; incompatible con --period")
     parser.add_argument("--scenario", choices=["better", "equal", "worse", "invalid", "insufficient"], default="better")
     args = parser.parse_args()
     if args.mode == "fixture":

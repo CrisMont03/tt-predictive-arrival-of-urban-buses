@@ -13,7 +13,7 @@ def cache_key(station_id, context, prepared, observations, metadata, simulation)
         "station_id": station_id, "simulation": simulation,
         "contract": contract(metadata.get("window", 10), metadata.get("schema_version", "arribo-sequences-v2")),
         "artifact": {key: metadata.get(key) for key in
-                     ("model_version", "model_sha256", "release_id", "manifest_sha256", "scaler", "fallback", "radius", "context_profile")},
+                     ("model_version", "model_sha256", "historical_sha256", "target_definition", "predictor_kind", "release_id", "manifest_sha256", "scaler", "fallback", "radius", "context_profile")},
         "context": context,
         "inputs": {key: value for key, value in prepared.items() if key != "provenance"},
         "history": [(item.get("uid"), item["query_id"], item["actual_min"],
@@ -41,6 +41,14 @@ def reusable_prediction(value, now, station_id, model_version, simulation):
                 or prediction.expires_at <= now
                 or not cached_sources_valid(prediction.context_sources, now)):
             return None
-        return prediction.model_dump()
+        result = prediction.model_dump()
+        if prediction.prediction_target == "next_bus_wait":
+            arrival = prediction.estimated_arrival_at
+            if arrival <= now:
+                return None
+            elapsed = max(0, (now - prediction.requested_at).total_seconds()/60)
+            result.update(waiting_time_min=(arrival-now).total_seconds()/60, requested_at=now,
+                          confidence_interval=tuple(max(0, v-elapsed) for v in prediction.confidence_interval))
+        return result
     except (ValueError, TypeError):
         return None

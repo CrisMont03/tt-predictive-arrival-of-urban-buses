@@ -36,6 +36,18 @@ test('Contrato: rechaza respuestas incompletas, no finitas, ajenas o falsamente 
   assert.throws(() => parsePrediction(prediction({ requested_at: undefined }), { queryId: 'query-unit-1', stationId: 'rio_consulado' }));
 });
 
+test('Próximo bus: admite esperas largas e identifica la referencia histórica sin alterar el dominio antiguo', () => {
+  const value = prediction({ source: 'historical', simulation: false, waiting_time_min: 120,
+    confidence_interval: [50, 180], prediction_target: 'next_bus_wait', estimator: 'historical',
+    requested_at: '2026-10-20T14:00:00Z', estimated_arrival_at: '2026-10-20T16:00:00Z' });
+  assert.equal(parsePrediction(value).waiting_time_min, 120);
+  assert.equal(parsePrediction({ ...value, source: 'cache' }).estimator, 'historical');
+  for (const invalid of [{ ...value, prediction_target: 'personal_wait' }, { ...value, estimated_arrival_at: null },
+    { ...value, simulation: true }, { ...value, waiting_time_min: 1441 }, { ...value, estimator: 'lstm' }]) {
+    assert.throws(() => parsePrediction(invalid));
+  }
+});
+
 test('Historial: normaliza Timestamp y conserva procedencia; una predicción vencida sigue siendo historial válido', () => {
   const value = prediction();
   const timestamp = (date: string) => ({ toDate: () => new Date(date) });
@@ -92,7 +104,7 @@ test('Feedback: solo confirma acuse válido; red, 503 y respuesta perdida permit
   for (const value of [{}, null, { status: 'received', query_id: 'wrong-id', simulation: true, outside_domain: false }]) {
     assert.throws(() => assertFeedbackAcknowledgement(value, 'query-unit-1'));
   }
-  for (const error of [{ code: 'NETWORK', status: 0 }, { code: 'SERVICE_ERROR', status: 503 }, { code: 'INVALID_RESPONSE', status: 200 }]) {
+  for (const error of [{ code: 'NETWORK', status: 0 }, { code: 'TIMEOUT', status: 408 }, { code: 'SERVICE_ERROR', status: 503 }, { code: 'INVALID_RESPONSE', status: 200 }]) {
     assert.equal(retryableFeedbackError(error), true);
   }
   for (const status of [401, 403, 404, 409, 422]) assert.equal(retryableFeedbackError({ code: 'ERROR', status }), false);

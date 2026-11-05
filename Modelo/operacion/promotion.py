@@ -1,5 +1,6 @@
 """Separate deployment authority; validate before traffic, retain rollback evidence."""
 import time
+import os
 
 from app.artifacts import digest, json_bytes
 from .registry import Lease
@@ -21,19 +22,22 @@ class CloudRunDriver:
             target["tag"] = item["tag"]
         return values
 
-    def __init__(self, project, region, service, image):
+    def __init__(self, project, region, service, image, *, credentials=None):
         if "@sha256:" not in image:
             raise ValueError("Fija la imagen por digest, no por etiqueta")
         self.project, self.region, self.service, self.image = project, region, service, image
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
-        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        if credentials is None:
+            credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         self.session = AuthorizedSession(credentials)
         self.name = f"projects/{project}/locations/{region}/services/{service}"
         self.url = "https://run.googleapis.com/v2/" + self.name
 
     def patch(self, body, mask):
         response = self.session.patch(self.url, params={"updateMask": mask}, json=body, timeout=30)
+        if response.status_code >= 400:
+            raise ValueError("Cloud Run rechazó la configuración: " + response.json().get("error", {}).get("message", "sin detalle"))
         response.raise_for_status()
         operation = response.json()
         for _ in range(180):
@@ -57,14 +61,20 @@ class CloudRunDriver:
         return {item["revision"]: item["percent"] for item in values if item.get("percent", 0)}
 
     def deploy(self, package, release_id):
-        suffix = "r" + digest(json_bytes([package, release_id]))[:16]
+        suffix = "r" + digest(json_bytes([package, release_id, self.image]))[:16]
         env = dict(ARRIBO_MODE="production", ARRIBO_MODEL_DIR="",
+                   OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1",
+                   TF_NUM_INTEROP_THREADS="2", TF_NUM_INTRAOP_THREADS="2",
+                   ARRIBO_CODE_REVISION=os.getenv("ARRIBO_CODE_REVISION", self.image.split("@sha256:")[-1]),
                    ARRIBO_MODEL_MANIFEST_URI=package["uri"],
                    ARRIBO_MODEL_MANIFEST_GENERATION=str(package["generation"]),
                    ARRIBO_MODEL_MANIFEST_SHA256=package["sha256"])
         existing = self.describe()
+        tagged = next((item for item in existing.get("trafficStatuses", []) if item.get("tag") == suffix), None)
+        if tagged:
+            return dict(revision=tagged["revision"], url=tagged["uri"])
         template = existing["template"]
-        template["revision"] = self.name + "/revisions/" + self.service + "-" + suffix
+        template["revision"] = self.service + "-" + suffix
         container = template["containers"][0]
         container["image"] = self.image
         container["env"] = [entry for entry in container.get("env", []) if entry["name"] not in env]
@@ -97,6 +107,19 @@ class CloudRunDriver:
         existing = self.describe()
         values = self.targets(traffic, existing.get("trafficStatuses", []))
         self.patch(dict(name=self.name, etag=existing["etag"], traffic=values), "traffic")
+
+    def baseline_ready(self):
+        import httpx
+        url = self.describe()["uri"]
+        for _ in range(12):
+            try:
+                response = httpx.get(url + "/health", timeout=10)
+                if response.status_code == 200 and response.json().get("model_ready") is False:
+                    return True
+            except (httpx.HTTPError, ValueError):
+                pass
+            time.sleep(5)
+        return False
 
 
 def promote(registry, driver, package, evaluation, *, expected_incumbent, model_version,
@@ -131,6 +154,8 @@ def promote(registry, driver, package, evaluation, *, expected_incumbent, model_
         if current is None and expected_incumbent is not None:
             raise ValueError("Primero registra/aprueba la publicación inicial")
         previous_traffic = driver.traffic()
+        if current is None and hasattr(driver, "baseline_ready") and not driver.baseline_ready():
+            raise ValueError("La revisión base no coincide con una primera publicación sin modelo")
         record = dict(status="deploying", previous_traffic=previous_traffic, previous=current,
                       package=package, model_version=model_version,
                       evaluation_sha256=digest(json_bytes(evaluation)))
@@ -175,14 +200,30 @@ def rollback(registry, driver, *, enabled=False):
         return {"status": "disabled"}
     with Lease(registry, "rollback", key="leases/promotion"):
         current, gen = registry.read("deployment/current")
-        if not current or not current.get("previous") or not current.get("previous_traffic"):
+        if not current or not current.get("previous_traffic"):
             raise ValueError("No hay una versión anterior registrada")
+        if not current.get("previous"):
+            active_traffic = driver.traffic()
+            driver.switch(current["previous_traffic"])
+            if not driver.baseline_ready():
+                driver.switch(active_traffic)
+                raise ValueError("La revisión base recuperada no responde correctamente")
+            registry.cas("deployment/current", None, gen)
+            deployment, deployment_gen = registry.read("deployments/" + current["package"]["release_id"])
+            if deployment:
+                registry.cas("deployments/" + current["package"]["release_id"], {**deployment, "status": "rolled_back"}, deployment_gen)
+            value, lock_gen = registry.read("promotion/suspended")
+            registry.cas("promotion/suspended", {"suspended": True, "reason": "initial_release_rollback"}, lock_gen)
+            return {"status": "rolled_back", "model_version": None, "predictor_ready": False}
         previous = current["previous"]
         if not driver.ready(previous["deployment"], {"release_id": previous["package"]["release_id"],
                                                      "model_version": previous["model_version"]}):
             raise ValueError("La revisión anterior no está lista")
         driver.switch(current["previous_traffic"])
         registry.cas("deployment/current", previous, gen)
+        deployment, deployment_gen = registry.read("deployments/" + current["package"]["release_id"])
+        if deployment:
+            registry.cas("deployments/" + current["package"]["release_id"], {**deployment, "status": "rolled_back"}, deployment_gen)
         value, lock_gen = registry.read("promotion/suspended")
         registry.cas("promotion/suspended", {"suspended": True, "reason": "manual_rollback"}, lock_gen)
         return {"status": "rolled_back", "model_version": previous["model_version"]}

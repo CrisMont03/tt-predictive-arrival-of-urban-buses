@@ -25,19 +25,30 @@ class Context(BaseModel):
 class PredictResponse(BaseModel):
     query_id: str
     station_id: str
-    waiting_time_min: float = Field(ge=0, le=45, allow_inf_nan=False)
+    waiting_time_min: float = Field(ge=0, le=1440, allow_inf_nan=False)
     confidence_interval: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], Annotated[float, Field(ge=0, allow_inf_nan=False)]]
     model_version: str = Field(min_length=1)
     timestamp: datetime
     requested_at: datetime
     expires_at: datetime
-    source: Literal["mock", "cache", "model"]
+    source: Literal["mock", "cache", "model", "historical"]
     simulation: bool
+    prediction_target: Literal["personal_wait", "next_bus_wait"] = "personal_wait"
+    estimated_arrival_at: datetime | None = None
+    estimator: Literal["lstm", "historical"] | None = None
+    fallback_level: str | None = None
     context: Context
     context_sources: dict[str, dict[str, Any]] | None = None
 
     @model_validator(mode="after")
     def valid_snapshot(self):
+        if self.prediction_target == "personal_wait" and self.waiting_time_min > 45:
+            raise ValueError("Espera fuera del contrato anterior")
+        if self.prediction_target == "next_bus_wait":
+            if self.estimated_arrival_at is None or self.estimated_arrival_at.utcoffset() is None or self.estimated_arrival_at < self.requested_at:
+                raise ValueError("Falta una llegada estimada válida")
+        if self.source == "historical" and (self.prediction_target != "next_bus_wait" or self.simulation or self.estimator != "historical"):
+            raise ValueError("Fuente histórica incompatible")
         if self.confidence_interval[0] > self.confidence_interval[1]:
             raise ValueError("Intervalo invertido")
         if any(value.utcoffset() is None for value in (self.timestamp, self.requested_at, self.expires_at)):
@@ -52,6 +63,6 @@ class PredictResponse(BaseModel):
 class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query_id: str = Field(min_length=8, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
-    actual_min: float = Field(ge=0, le=180, allow_inf_nan=False)
+    actual_min: float = Field(ge=0, le=1440, allow_inf_nan=False)
 
     wait_basis: Literal["since_query", "unspecified"] = "unspecified"

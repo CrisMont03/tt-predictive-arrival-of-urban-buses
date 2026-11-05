@@ -13,7 +13,7 @@ from .contracts import Context, FeedbackRequest, PredictRequest, PredictResponse
 from .store import FeedbackConflict, FeedbackTemporarilyUnavailable, FirestoreStore, MemoryStore
 from .context import fetch_context
 from .predictor import Predictor
-from .model_inputs import online_inputs, select_observations
+from .model_inputs import online_inputs, select_observations, NEXT_BUS_SCHEMA, NEXT_BUS_MAX_WAIT
 from .prediction_cache import cache_key, cache_expiration, reusable_prediction
 from .artifacts import configured_model_directory
 
@@ -117,7 +117,7 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
             external = dict(await (context_provider or fetch_context)())
             context_sources = external.pop("_sources", None)
             raw_reports = store.recent_observations(body.station_id, now - timedelta(hours=2))
-            observations = (raw_reports if predictor.metadata.get("schema_version") == "arribo-sequences-feedback-v1"
+            observations = (raw_reports if predictor.metadata.get("schema_version") in ("arribo-sequences-feedback-v1", NEXT_BUS_SCHEMA)
                             else select_observations(raw_reports, now, body.station_id, predictor.metadata.get("window", 10)))
         context = Context(hour=local.hour, day_of_week=local.weekday(), is_weekend=int(local.weekday() >= 5), is_holiday=int(local.date() in holidays.Mexico(years=local.year)), **external)
         window = 10 if mode == "demo" else predictor.metadata.get("window", 10)
@@ -138,7 +138,16 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
             expires_at = cache_expiration(generated_at, context_sources)
             if expires_at <= generated_at:
                 raise HTTPException(503, {"code": "CONTEXT_EXPIRED", "message": "El contexto venció durante la consulta. Inténtalo de nuevo."})
-            value = PredictResponse(query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=generated_at, requested_at=now, expires_at=expires_at, source="mock" if simulation else "model", simulation=simulation, context=context, context_sources=context_sources).model_dump()
+            extra = {}
+            if metadata.get("schema_version") == NEXT_BUS_SCHEMA:
+                extra = dict(prediction_target="next_bus_wait", estimated_arrival_at=now+timedelta(minutes=wait),
+                             estimator=metadata.get("predictor_kind", "lstm"))
+                if extra["estimator"] == "historical":
+                    station = metadata["fallback"].get(body.station_id, {})
+                    keys = [(f"dh:{local.weekday()}:{local.hour}", "station-weekday-hour"),
+                            (f"h:{local.hour}", "station-hour"), ("global", "station")]
+                    extra["fallback_level"] = next((level for key, level in keys if station.get(key, {}).get("count", 0)>0), None)
+            value = PredictResponse(**extra, query_id=body.request_id, station_id=body.station_id, waiting_time_min=wait, confidence_interval=interval, model_version=version, timestamp=generated_at, requested_at=now, expires_at=expires_at, source="mock" if simulation else "historical" if extra.get("estimator") == "historical" else "model", simulation=simulation, context=context, context_sources=context_sources).model_dump()
             logging.getLogger("arribo").info("prediction.cache_miss station=%s model=%s simulation=%s", body.station_id, version, simulation)
             store.set_cache(key, value)
         return store.create_query(uid, body.request_id, {**value, "requested_at": now})
@@ -148,10 +157,15 @@ def create_app(mode=None, store=None, predictor=None, *, allow_integration=False
         original = store.get_query(uid, body.query_id)
         if not original:
             raise HTTPException(404, {"code": "QUERY_NOT_FOUND", "message": "No se encontró esta consulta en tu cuenta."})
-        report = {"query_id": body.query_id, "uid": uid, "station_id": original["station_id"], "actual_min": body.actual_min, "predicted_min": original["waiting_time_min"], "error_min": body.actual_min - original["waiting_time_min"], "context": original["context"], "query_at": original.get("requested_at", original["timestamp"]), "received_at": clock(), "simulation": original["simulation"], "outside_domain": body.actual_min > 45, "model_version": original["model_version"]}
+        new_target = original.get("prediction_target") == "next_bus_wait"
+        domain = NEXT_BUS_MAX_WAIT if new_target else 45
+        if not new_target and body.actual_min > 180:
+            raise HTTPException(422, {"code": "INVALID_REQUEST", "message": "Espera fuera del formulario anterior."})
+        report = {"query_id": body.query_id, "uid": uid, "station_id": original["station_id"], "actual_min": body.actual_min, "predicted_min": original["waiting_time_min"], "error_min": body.actual_min - original["waiting_time_min"], "context": original["context"], "query_at": original.get("requested_at", original["timestamp"]), "received_at": clock(), "simulation": original["simulation"], "outside_domain": body.actual_min > domain, "model_version": original["model_version"]}
+        report["prediction_target"] = original.get("prediction_target", "personal_wait")
         from .feedback_arrivals import arrival_fields
         report.update(arrival_fields(report["query_at"], body.actual_min, report["received_at"],
-                                     body.wait_basis, simulation=original["simulation"]))
+                                     body.wait_basis, simulation=original["simulation"], max_wait=domain))
         if original.get("context_sources") is not None:
             report["context_sources"] = original["context_sources"]
         try:

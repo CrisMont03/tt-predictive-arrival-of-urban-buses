@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo
 
 SCHEMA_VERSION = "arribo-sequences-v2"
 FEEDBACK_SCHEMA = "arribo-sequences-feedback-v1"
-SUPPORTED_SCHEMAS = (SCHEMA_VERSION, FEEDBACK_SCHEMA)
+NEXT_BUS_SCHEMA = "arribo-next-bus-feedback-v1"
+NEXT_BUS_MAX_WAIT = 1440
+SUPPORTED_SCHEMAS = (SCHEMA_VERSION, FEEDBACK_SCHEMA, NEXT_BUS_SCHEMA)
 FEATURES = ["hour", "day_of_week", "is_weekend", "is_holiday", "precipitation_mm", "temp_c", "humidity"]
 BUS_FEATURES = ["minutes_since_bus", "interval_1_min", "interval_2_min", "interval_3_min"]
 UNITS = ["hour_0_23", "weekday_0_6", "binary", "binary", "mm", "degC", "percent"]
@@ -63,6 +65,12 @@ def calendar_context(at):
 def contract(window, schema_version=SCHEMA_VERSION):
     if schema_version not in SUPPORTED_SCHEMAS:
         raise ValueError("Contrato desconocido")
+    if schema_version == NEXT_BUS_SCHEMA:
+        value = contract(window, FEEDBACK_SCHEMA)
+        value.update(schema_version=NEXT_BUS_SCHEMA, target_definition="next_bus_wait",
+                     max_wait=NEXT_BUS_MAX_WAIT, hour_encoding="decimal-hour-from-step-timestamp")
+        value["units"] = ["decimal_hour_0_24", *UNITS[1:]]
+        return value
     if schema_version == FEEDBACK_SCHEMA:
         value = contract(window)
         value.update(schema_version=schema_version,
@@ -82,7 +90,7 @@ def contract(window, schema_version=SCHEMA_VERSION):
                 sequence_policy="available-reports_then_current; fallback-before-oldest-report-v1")
 
 
-def select_observations(observations, now, station_id, window, start_at=None, *, allow_offline_synthetic=False):
+def select_observations(observations, now, station_id, window, start_at=None, *, allow_offline_synthetic=False, max_wait=MAX_WAIT):
     """Check availability at prediction time, not at the report's own query."""
     contract(window)
     now = timestamp(now)
@@ -100,7 +108,7 @@ def select_observations(observations, now, station_id, window, start_at=None, *,
             actual = finite(report["actual_min"])
         except (KeyError, TypeError, ValueError):
             continue
-        if actual is None or not 0 <= actual <= MAX_WAIT or not lower <= query_at < now or not query_at <= received_at < now:
+        if actual is None or not 0 <= actual <= max_wait or not lower <= query_at < now or not query_at <= received_at < now:
             continue
         identity = (str(report.get("uid", "")), str(report.get("query_id", "")))
         if not identity[1]:
@@ -113,12 +121,13 @@ def select_observations(observations, now, station_id, window, start_at=None, *,
 
 class FallbackAccumulator:
     """Accept only training observations at the caller's causal cutoff."""
-    def __init__(self):
+    def __init__(self, max_wait=MAX_WAIT):
         self.table = {}
+        self.max_wait = max_wait
 
     def add(self, station_id, query_at, actual_min):
         value = finite(actual_min)
-        if value is None or not 0 <= value <= MAX_WAIT:
+        if value is None or not 0 <= value <= self.max_wait:
             return
         context = calendar_context(query_at)
         station = self.table.setdefault(station_id, {})
@@ -128,14 +137,14 @@ class FallbackAccumulator:
             entry["count"] += 1
 
 
-def fallback_value(table, station_id, at):
+def fallback_value(table, station_id, at, *, max_wait=MAX_WAIT):
     context = calendar_context(at)
     station = (table or {}).get(station_id, {})
     for key in (f"dh:{context['day_of_week']}:{context['hour']}", f"h:{context['hour']}", "global"):
         entry = station.get(key)
         if entry and entry["count"] > 0:
             value = finite(entry["sum"]) / entry["count"]
-            if not 0 <= value <= MAX_WAIT:
+            if not 0 <= value <= max_wait:
                 raise ValueError("Promedio fuera de dominio")
             return value
     return None
@@ -182,12 +191,24 @@ def online_inputs(context, window, *, now, station_id="rio_consulado", observati
     received_at itself is never interpreted as a bus arrival.
     """
     contract(window, schema_version)
-    if schema_version == FEEDBACK_SCHEMA and arrivals is not None:
+    feedback_schema = schema_version in (FEEDBACK_SCHEMA, NEXT_BUS_SCHEMA)
+    max_wait = NEXT_BUS_MAX_WAIT if schema_version == NEXT_BUS_SCHEMA else MAX_WAIT
+    if feedback_schema and arrivals is not None:
         raise ValueError("El contrato de feedback no acepta llegadas completas de cámara")
     observations = list(observations or [])
     now = timestamp(now)
+    if schema_version == NEXT_BUS_SCHEMA:
+        # Match Firestore's snapshot horizon even when a local caller supplies the full archive.
+        recent = []
+        for report in observations:
+            try:
+                if now-timedelta(seconds=HORIZON_SECONDS) <= timestamp(report['received_at']) < now:
+                    recent.append(report)
+            except (KeyError, TypeError, ValueError):
+                continue
+        observations = recent
     reports = select_observations(observations, now, station_id, window, start_at,
-                                  allow_offline_synthetic=allow_offline_synthetic)
+                                  allow_offline_synthetic=allow_offline_synthetic, max_wait=max_wait)
     lower = now - timedelta(seconds=HORIZON_SECONDS)
     if start_at is not None:
         lower = max(lower, timestamp(start_at))
@@ -196,7 +217,7 @@ def online_inputs(context, window, *, now, station_id="rio_consulado", observati
     steps, provenance = [], []
     for i in range(missing):
         at = lower + (edge - lower) * ((i + 1) / (missing + 1))
-        wait = fallback_value(fallback, station_id, at) if lower <= at < edge else None
+        wait = fallback_value(fallback, station_id, at, max_wait=max_wait) if lower <= at < edge else None
         if wait is not None:
             steps.append(_step({}, at, wait, "fallback"))
             provenance.append({"kind": "fallback", "query_at": at.isoformat()})
@@ -214,10 +235,15 @@ def online_inputs(context, window, *, now, station_id="rio_consulado", observati
     provenance.append({"kind": "current", "query_at": now.isoformat()})
     inputs = {key: [step[key] for step in steps] for key in steps[0]}
     inputs["provenance"] = provenance
-    if schema_version == FEEDBACK_SCHEMA:
+    if schema_version == NEXT_BUS_SCHEMA:
+        for i, item in enumerate(provenance):
+            if item["kind"] != "padding":
+                local = timestamp(item["query_at"]).astimezone(LOCAL_ZONE)
+                inputs["temporal"][i][0] = local.hour + local.minute/60 + local.second/3600 + local.microsecond/3_600_000_000
+    if feedback_schema:
         from .feedback_arrivals import apply_arrival_context
         apply_arrival_context(inputs, observations, now, station_id, start_at=start_at,
-                              allow_offline_synthetic=allow_offline_synthetic)
+                              allow_offline_synthetic=allow_offline_synthetic, max_wait=max_wait)
     validate_inputs(inputs, window)
     return inputs
 

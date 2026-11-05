@@ -7,9 +7,9 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS
+from .model_inputs import SCHEMA_VERSION, SUPPORTED_SCHEMAS, NEXT_BUS_SCHEMA
 
-FILES = {"metadata.json": 4_000_000, "model.keras": 250_000_000, "xgboost.json": 100_000_000}
+FILES = {"metadata.json": 4_000_000, "model.keras": 250_000_000, "xgboost.json": 100_000_000, "historical.json": 4_000_000}
 
 
 def digest(data):
@@ -53,7 +53,11 @@ def validate_manifest(manifest):
             or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", manifest.get("release_id", ""))):
         raise ValueError("Paquete incompatible o simulado")
     entries = manifest.get("files", {})
-    if not {"model.keras", "metadata.json"} <= entries.keys() or not entries.keys() <= FILES.keys():
+    historical = manifest.get('predictor_kind') == 'historical'
+    required = {'historical.json','metadata.json'} if historical else {'model.keras','metadata.json'}
+    if historical and (manifest['schema_version'] != NEXT_BUS_SCHEMA or 'model.keras' in entries):
+        raise ValueError('Paquete histórico incompatible')
+    if not required <= entries.keys() or not entries.keys() <= FILES.keys():
         raise ValueError("Archivos de paquete inválidos")
     for name, entry in entries.items():
         if (not isinstance(entry.get("generation"), int) or entry["generation"] < 1
@@ -102,7 +106,9 @@ def publish_package(directory, prefix_uri, release_id, *, client=None):
     metadata = read_json(Path(directory) / "metadata.json")
     if metadata.get("simulation") or metadata.get("schema_version") not in SUPPORTED_SCHEMAS:
         raise ValueError("No publicar simulaciones ni contratos anteriores")
-    if digest((Path(directory) / "model.keras").read_bytes()) != metadata["model_sha256"]:
+    historical = metadata.get('predictor_kind') == 'historical'
+    filename, checksum = ('historical.json','historical_sha256') if historical else ('model.keras','model_sha256')
+    if digest((Path(directory) / filename).read_bytes()) != metadata[checksum]:
         raise ValueError("Checksum del modelo incorrecto")
     bucket_name, prefix = gcs_parts(prefix_uri)
     if client is None:
@@ -133,6 +139,8 @@ def publish_package(directory, prefix_uri, release_id, *, client=None):
         files[name] = dict(generation=int(blob.generation), sha256=digest(content), size=len(content))
     manifest = dict(format="arribo-package-v1", schema_version=metadata["schema_version"],
                     release_id=release_id, simulation=False, files=files)
+    if historical:
+        manifest['predictor_kind'] = 'historical'
     validate_manifest(manifest)
     content = json_bytes(manifest)
     blob = bucket.blob(f"{prefix}/{release_id}/manifest.json")

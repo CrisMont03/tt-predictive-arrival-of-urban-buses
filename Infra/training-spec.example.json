@@ -1,8 +1,9 @@
 {
-  "schema_version": "arribo-sequences-v2",
+  "schema_version": "arribo-sequences-feedback-v1",
   "simulation": false,
   "window": 10,
   "epochs": 50,
+  "training": {"window": 10, "units": 16, "dense_units": 16, "optimizer": "rmsprop", "learning_rate": 0.0003, "batch_size": 32, "epochs": 50, "patience": 6, "seed": 2026050, "shuffle": false},
   "minimum_benchmark": 30,
   "history": {"uri": "gs://arribo-68326-datasets/history/dataset-final-VERSION.csv", "generation": "REPLACE", "sha256": "REPLACE"}
 }

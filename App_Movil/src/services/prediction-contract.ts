@@ -11,15 +11,19 @@ export function parsePrediction(value: unknown, expected?: ExpectedQuery): Predi
   if (!record(value) || typeof value.query_id !== 'string' || !value.query_id ||
       typeof value.station_id !== 'string' || !value.station_id ||
       typeof value.model_version !== 'string' || !value.model_version.trim() ||
-      !between(value.waiting_time_min, 0, 45) ||
+      !between(value.waiting_time_min, 0, value.prediction_target === 'next_bus_wait' ? 1440 : 45) ||
       !Array.isArray(value.confidence_interval) || value.confidence_interval.length !== 2 ||
       !value.confidence_interval.every(n => finite(n) && n >= 0) || value.confidence_interval[0] > value.confidence_interval[1] ||
       !date(value.timestamp) || !date(value.expires_at) ||
       (value.requested_at !== undefined && !date(value.requested_at)) ||
       Date.parse(value.expires_at as string) <= Date.parse(value.timestamp as string) ||
-      !['mock', 'cache', 'model'].includes(value.source as string) || typeof value.simulation !== 'boolean' ||
+      !['mock', 'cache', 'model', 'historical'].includes(value.source as string) || typeof value.simulation !== 'boolean' ||
       (value.source === 'mock' && !value.simulation) || (value.source === 'model' && value.simulation) ||
       !record(value.context)) throw new Error('Respuesta de predicción inválida.');
+  if (value.prediction_target != null && !['personal_wait', 'next_bus_wait'].includes(value.prediction_target as string)) throw new Error('Objetivo desconocido.');
+  if (value.estimator != null && !['lstm', 'historical'].includes(value.estimator as string)) throw new Error('Estimador desconocido.');
+  if (value.prediction_target === 'next_bus_wait' && (!date(value.estimated_arrival_at) || !date(value.requested_at) || Date.parse(value.estimated_arrival_at as string) < Date.parse(value.requested_at as string))) throw new Error('Falta una llegada estimada válida.');
+  if (value.source === 'historical' && (value.simulation || value.prediction_target !== 'next_bus_wait' || value.estimator !== 'historical')) throw new Error('Referencia histórica incompatible.');
   const c = value.context;
   if (!between(c.hour, 0, 23) || !Number.isInteger(c.hour) || !between(c.day_of_week, 0, 6) || !Number.isInteger(c.day_of_week) ||
       !binary(c.is_weekend) || !(c.is_holiday === null || binary(c.is_holiday)) ||
@@ -44,7 +48,8 @@ export function toISO(value: unknown): string {
 
 export function normalizePredictionDates(data: Record<string, unknown>, queryId: string) {
   return { ...data, query_id: queryId, timestamp: toISO(data.timestamp),
-    requested_at: toISO(data.requested_at ?? data.timestamp), expires_at: toISO(data.expires_at) };
+    requested_at: toISO(data.requested_at ?? data.timestamp), expires_at: toISO(data.expires_at),
+    ...(data.estimated_arrival_at != null ? { estimated_arrival_at: toISO(data.estimated_arrival_at) } : {}) };
 }
 
 export function assertFeedbackAcknowledgement(value: unknown, queryId: string) {

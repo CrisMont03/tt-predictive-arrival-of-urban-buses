@@ -47,6 +47,42 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual([int(item["wait_observed"]) for item in rows], [0, 1])
 
+    def test_generated_csv_requires_opt_in_and_preserves_provenance_and_weather(self):
+        source = self.root / "2025_06_02" / "datasets"
+        source.mkdir(parents=True)
+        item = row(1, "06:00:00", "06:10:00", 10)
+        path = source / "2025_06_02_dataset.csv"
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(item))
+            writer.writeheader(); writer.writerow(item)
+        self.assertEqual(consolidate.daily_csvs(self.root), [])
+        db = self.root / 'generated.db'
+        with patch.object(consolidate, 'RESULTADOS', self.root), patch.object(consolidate, 'DB_PATH', db), patch.object(consolidate, 'INCLUDE_GENERATED', True), patch.object(consolidate, 'SYNTHETIC_DATES', {'2025-06-02'}):
+            consolidate.cmd_consolidar()
+            consolidate.cmd_consolidar()
+        with sqlite3.connect(db) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM eventos_espera').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT is_synthetic,source_line FROM eventos_procedencia').fetchone(), (1,2))
+            self.assertEqual(conn.execute('SELECT temp_c,humidity FROM eventos_enriquecidos').fetchone(), (19,65))
+        out = self.root / 'export.csv'
+        with patch.object(consolidate, 'DB_PATH', db), patch.object(consolidate, 'CSV_FINAL', out):
+            consolidate.cmd_exportar()
+        exported = next(csv.DictReader(out.open()))
+        self.assertEqual(exported['source'], 'synthetic')
+        self.assertEqual(exported['is_synthetic'], '1')
+        self.assertEqual(exported['camera_id'], '')
+
+    def test_generated_csv_without_declared_origin_is_rejected(self):
+        source = self.root / '2025_06_02' / 'datasets'
+        source.mkdir(parents=True)
+        item = row(1, '06:00:00', '06:10:00', 10)
+        with (source / 'generated_dataset.csv').open('w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(item))
+            writer.writeheader(); writer.writerow(item)
+        with patch.object(consolidate, 'RESULTADOS', self.root), patch.object(consolidate, 'DB_PATH', self.root / 'denied.db'), patch.object(consolidate, 'INCLUDE_GENERATED', True), patch.object(consolidate, 'SYNTHETIC_DATES', set()):
+            with self.assertRaisesRegex(ValueError, 'sin fecha sintética'):
+                consolidate.cmd_consolidar()
+
     def test_bus_only_contributes_and_passengers_do_not_duplicate_bus(self):
         rows = read_rows(self.write([row(-1, "06:00:00", "06:00:00"), row(1, "06:03:00", "06:10:00", 7), row(2, "06:04:00", "06:10:00", 6), row(3, "06:12:00", "06:20:00", 8)]))
         examples, report = build(rows, 10)

@@ -81,8 +81,8 @@ def plan(config, stage):
                     "ARRIBO_AUTO_PROMOTION": str(config["auto_promotion"]).lower()}
         for job, identity, script, env in (("arribo-retrain", "trainer", "retrain_job.py", trainer),
                                            ("arribo-promote", "promotor", "promote_job.py", promotor)):
-            args = (f"Modelo/{script},--mode,cloud,--project,{project},--confirm-dev-project,{project}" if identity == "trainer"
-                    else f"Modelo/{script},--execute,--confirm-dev-project,{project}")
+            args = (f"Modelo/{script},--mode=cloud,--project={project},--confirm-dev-project={project}" if identity == "trainer"
+                    else f"Modelo/{script},--execute,--confirm-dev-project={project}")
             command(["run", "jobs", "deploy", job, "--region", region, "--image", config["job_image"],
                      "--service-account", accounts[identity], "--tasks", "1", "--parallelism", "1", "--max-retries", "1",
                      "--task-timeout", config["job_timeout"], "--memory", "4Gi", "--cpu", "2",

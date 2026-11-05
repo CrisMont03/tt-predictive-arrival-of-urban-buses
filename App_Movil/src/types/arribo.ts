@@ -25,7 +25,11 @@ export type Prediction = {
   timestamp: string;
   requested_at?: string;
   expires_at: string;
-  source: 'mock' | 'cache' | 'model';
+  source: 'mock' | 'cache' | 'model' | 'historical';
+  prediction_target?: 'personal_wait' | 'next_bus_wait';
+  estimated_arrival_at?: string | null;
+  estimator?: 'lstm' | 'historical' | null;
+  fallback_level?: string | null;
   simulation: boolean;
   context: Context;
   context_sources?: Record<string, Record<string, unknown>> | null;
